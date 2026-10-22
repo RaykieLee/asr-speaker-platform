@@ -147,6 +147,8 @@ def test_sherpa_adapter_uses_official_stream_hotword_interface(tmp_path, monkeyp
     assert calls["hotwords"] == "李 子 熙/项 目 名"
     assert calls["audio"] == (16_000, [0.1, -0.1])
     assert calls["configuration"]["decoding_method"] == "modified_beam_search"
+    assert calls["configuration"]["modeling_unit"] == "cjkchar"
+    assert calls["configuration"]["bpe_vocab"] == ""
     assert adapter.model_version == "offline-v2"
     adapter.transcribe([0.1], 16_000, [["Open", "AI"], ["project", "name"]])
     assert calls["hotwords"] == "Open AI/project name"
@@ -155,6 +157,39 @@ def test_sherpa_adapter_uses_official_stream_hotword_interface(tmp_path, monkeyp
     greedy.decoding_method = "greedy_search"
     with pytest.raises(EngineConfigError, match="热词要求 modified_beam_search"):
         greedy.transcribe([0.0], 16_000, ["term"])
+
+
+def test_bpe_model_requires_and_passes_its_vocabulary(tmp_path, monkeypatch):
+    paths = [tmp_path / name for name in ("model.onnx", "encoder.onnx", "decoder.onnx",
+                                           "joiner.onnx", "tokens.txt")]
+    for path in paths:
+        path.touch()
+    model = ModelArtifact("offline", "transducer", "offline-bpe-v1", (paths[0],))
+    files = OfflineTransducerFiles(*paths[1:])
+    calls = {}
+
+    class FakeRecognizer:
+        pass
+
+    class Offline:
+        @staticmethod
+        def from_transducer(**kwargs):
+            calls.update(kwargs)
+            return FakeRecognizer()
+
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", SimpleNamespace(OfflineRecognizer=Offline))
+    with pytest.raises(EngineConfigError, match="需要存在且可读"):
+        SherpaOfflineRecognizer.load(model, files, modeling_unit="cjkchar+bpe")
+    assert calls == {}
+
+    vocab = tmp_path / "bpe.vocab"
+    vocab.write_text("▁张 0\n三 -1\n", encoding="utf-8")
+    adapter = SherpaOfflineRecognizer.load(
+        model, files, modeling_unit="cjkchar+bpe", bpe_vocab=vocab,
+    )
+    assert isinstance(adapter, SherpaOfflineRecognizer)
+    assert calls["modeling_unit"] == "cjkchar+bpe"
+    assert calls["bpe_vocab"] == str(vocab)
 
 
 def test_offline_hotword_format_rejects_unrepresentable_tokens():

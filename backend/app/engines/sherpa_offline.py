@@ -34,13 +34,21 @@ class SherpaOfflineRecognizer:
     def load(cls, model: ModelArtifact, files: OfflineTransducerFiles, *,
              num_threads: int = 2, provider: str = "cpu",
              decoding_method: str = "modified_beam_search",
-             hotwords_score: float = 1.5) -> "SherpaOfflineRecognizer":
+             hotwords_score: float = 1.5,
+             modeling_unit: str = "cjkchar",
+             bpe_vocab: str | Path | None = None) -> "SherpaOfflineRecognizer":
         model.require_files()
         files.require_files()
         if model.architecture != "transducer":
             raise EngineConfigError("离线 sherpa adapter 仅支持 Transducer 架构")
         if decoding_method not in {"greedy_search", "modified_beam_search"}:
             raise EngineConfigError(f"离线 Transducer 不支持解码方式: {decoding_method}")
+        if not modeling_unit.strip():
+            raise EngineConfigError("必须指定 Transducer modeling_unit")
+        if "bpe" in modeling_unit.lower() and (bpe_vocab is None or not Path(bpe_vocab).is_file()):
+            raise EngineConfigError(
+                f"modeling_unit={modeling_unit!r} 需要存在且可读的 bpe_vocab 文件"
+            )
         try:
             import sherpa_onnx
         except ImportError as exc:
@@ -52,6 +60,8 @@ class SherpaOfflineRecognizer:
                 num_threads=num_threads, sample_rate=16_000, feature_dim=80,
                 decoding_method=decoding_method, provider=provider,
                 hotwords_score=hotwords_score,
+                modeling_unit=modeling_unit,
+                bpe_vocab=str(bpe_vocab) if bpe_vocab is not None else "",
             )
         except Exception as exc:
             raise EngineConfigError(f"创建 sherpa 离线识别器失败: {exc}") from exc
