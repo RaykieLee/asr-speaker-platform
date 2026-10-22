@@ -123,6 +123,7 @@ def test_stop_flushes_trailing_audio_and_emits_design_fields():
         assert {"local_speaker_id", "registered_speaker_id", "speaker_name", "overlap"} <= final.keys()
         assert completed["type"] == "completed"
         assert completed["duration"] == 0.1
+        assert completed["dropped_frames"] == 0
 
 
 def test_connections_get_independent_recognizer_streams():
@@ -187,7 +188,9 @@ def test_async_hotword_resolver_is_awaited_and_pinned():
         assert started["hotword_set_version"] == 3
         assert recognizer.streams[0].hotwords == ["项 目"]
         ws.send_json({"type": "stop"})
-        assert ws.receive_json()["type"] == "completed"
+        completed = ws.receive_json()
+        assert completed["type"] == "completed"
+        assert completed["dropped_frames"] == 0
 
 
 def test_hotword_resolver_failure_is_structured_error():

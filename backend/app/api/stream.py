@@ -85,7 +85,7 @@ async def stream_asr(websocket: WebSocket) -> None:
                     for event in events:
                         await send_json(event)
                     await send_json({"type": "completed", "session_id": session.session_id,
-                                     "duration": session.duration})
+                                     "duration": session.duration, "dropped_frames": 0})
                     return
                 events = await asyncio.to_thread(session.feed, chunk)
                 for event in events:
