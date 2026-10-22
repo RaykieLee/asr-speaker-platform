@@ -157,18 +157,20 @@ async def correct_transcription_speaker(job_id: str, local_id: str,
             "display_name": prediction.get("speaker_name"),
             "match_status": prediction.get("match_status"),
         })
+    actor = getattr(request.state, "actor", None)
+    actor_verified = bool(getattr(request.state, "actor_verified", False))
     audit.append({
         "at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "action": "manual_correction",
-        "operator": None,
-        "actor_verified": False,
+        "operator": actor,
+        "actor_verified": actor_verified,
         "registered_speaker_id": registered_id,
         "display_name": correction.display_name.strip() if correction.display_name else None,
     })
     saved = database.set_mapping_override(
         job_id, local_id, registered_speaker_id=registered_id,
         display_name=correction.display_name.strip() if correction.display_name else None,
-        operator=None,
+        operator=actor,
         metadata={"audit_log": audit},
     )
     return {

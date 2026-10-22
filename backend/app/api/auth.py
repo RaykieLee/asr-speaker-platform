@@ -39,9 +39,14 @@ def authorized_websocket(websocket: WebSocket, start_message: dict) -> bool:
 
 
 async def api_key_middleware(request: Request, call_next):
-    if request.url.path.startswith("/api/v1/") and not _valid(_bearer(request.headers.get("authorization"))):
+    key = _configured_key()
+    token = _bearer(request.headers.get("authorization"))
+    if request.url.path.startswith("/api/v1/") and not _valid(token):
         return JSONResponse(status_code=401, content={
             "type": "error", "code": "unauthorized", "message": "API Key 无效或未提供",
             "request_id": uuid.uuid4().hex,
         })
+    if key is not None and _valid(token):
+        request.state.actor = "admin"
+        request.state.actor_verified = True
     return await call_next(request)
