@@ -205,6 +205,7 @@ async def run_live_session(
 async def run_file_job(
     *,
     path: Path,
+    audio_seconds: float,
     base_url: str,
     run_id: str,
     hotword_set_id: str | None,
@@ -222,6 +223,7 @@ async def run_file_job(
         mode="file",
         started_at=datetime.now(timezone.utc).isoformat(),
         start_monotonic=started,
+        audio_seconds=audio_seconds,
     )
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
@@ -327,6 +329,7 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
             for index in range(file_count):
                 tasks.append(run_file_job(
                     path=upload_path,
+                    audio_seconds=audio_seconds,
                     base_url=args.base_url,
                     run_id=f"{run_tag}-file-{index + 1}",
                     hotword_set_id=args.hotword_set_id,

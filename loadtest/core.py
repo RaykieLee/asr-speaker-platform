@@ -96,7 +96,7 @@ class SessionResult:
     audio_seconds: float = 0.0
     frames_sent: int = 0
     server_dropped_frames: int | None = None
-    max_client_backlog_seconds: float = 0.0
+    max_client_backlog_seconds: float | None = None
     client_late_frames: int = 0
     first_partial_seconds: float | None = None
     final_text_seconds: float | None = None
@@ -252,8 +252,14 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
     succeeded = sum(item.completed and not item.error for item in results)
     audio_seconds = sum(item.audio_seconds for item in results)
     file_results = [item for item in results if item.mode == "file"]
-    file_audio_seconds = sum(item.audio_seconds for item in file_results)
-    processing_seconds = sum(item.processing_seconds or 0 for item in file_results)
+    successful_files = [item for item in file_results if item.completed and not item.error]
+    processing_samples = [
+        item for item in successful_files
+        if item.processing_seconds is not None and item.processing_seconds > 0
+    ]
+    file_audio_seconds = sum(item.audio_seconds for item in successful_files)
+    measured_file_audio_seconds = sum(item.audio_seconds for item in processing_samples)
+    processing_seconds = sum(item.processing_seconds for item in processing_samples if item.processing_seconds is not None)
     live_results = [item for item in results if item.mode == "realtime"]
     drop_coverage = sum(item.server_dropped_frames is not None for item in live_results)
     return {
@@ -264,8 +270,11 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
         "success_rate": succeeded / len(results) if results else None,
         "audio_seconds": audio_seconds,
         "file_audio_seconds": file_audio_seconds,
-        "processing_seconds": processing_seconds,
-        "file_audio_hours_per_processing_hour": file_audio_seconds / processing_seconds * 3600 if processing_seconds > 0 else None,
+        "file_audio_seconds_with_processing_measurement": measured_file_audio_seconds,
+        "processing_seconds": processing_seconds if processing_samples else None,
+        "file_audio_hours_per_processing_hour": measured_file_audio_seconds / processing_seconds if processing_seconds > 0 else None,
+        "file_processing_sample_count": len(processing_samples),
+        "file_attempted_audio_seconds": sum(item.audio_seconds for item in file_results),
         "latency_seconds": {
             "first_partial": {f"p{p}": percentile(partial_values, p) for p in (50, 95, 99)},
             "final_text": {f"p{p}": percentile(elapsed_values, p) for p in (50, 95, 99)},
@@ -275,8 +284,11 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
         "server_dropped_frames": sum(item.server_dropped_frames or 0 for item in live_results)
         if live_results and drop_coverage == len(live_results) else None,
         "server_drop_telemetry_coverage": {"reported": drop_coverage, "sessions": len(live_results)},
-        "max_client_backlog_seconds": max((item.max_client_backlog_seconds for item in results if item.mode == "realtime"), default=0.0)
-        if any(item.mode == "realtime" for item in results) else None,
+        "max_client_backlog_seconds": max(
+            (item.max_client_backlog_seconds for item in results
+             if item.mode == "realtime" and item.max_client_backlog_seconds is not None),
+            default=None,
+        ),
         "queue_seconds_p95": percentile((item.queue_seconds for item in results if item.queue_seconds is not None), 95),
         "rtf_p95": percentile((item.rtf for item in results if item.rtf is not None), 95),
     }
@@ -293,9 +305,11 @@ def write_report(
     output_dir.mkdir(parents=True, exist_ok=True)
     summary = summarize(results)
     wall_elapsed = config.get("wall_elapsed_seconds")
-    file_audio_seconds = sum(item.audio_seconds for item in results if item.mode == "file")
+    file_audio_seconds = sum(
+        item.audio_seconds for item in results if item.mode == "file" and item.completed and not item.error
+    )
     summary["file_audio_hours_per_wall_hour"] = (
-        file_audio_seconds / float(wall_elapsed) * 3600
+        file_audio_seconds / float(wall_elapsed)
         if wall_elapsed is not None and float(wall_elapsed) > 0
         else None
     )

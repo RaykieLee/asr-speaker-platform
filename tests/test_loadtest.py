@@ -1,10 +1,12 @@
 import asyncio
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
 from loadtest.core import SessionResult, evaluate_gates, pace_pcm, percentile, summarize, write_report
-from loadtest.runner import load_wav, write_repeated_wav
+from loadtest.runner import load_wav, run_file_job, write_repeated_wav
 
 
 def test_percentile_uses_linear_interpolation_and_empty_values():
@@ -84,6 +86,75 @@ def test_gate_fails_on_error_rate_and_marks_unreported_drops_unknown():
     assert gates["status"] == "fail"
     assert gates["checks"]["error_rate"]["status"] == "fail"
     assert gates["checks"]["server_dropped_frames"]["status"] == "not_evaluable"
+    assert gates["checks"]["max_client_backlog_seconds"]["status"] == "not_evaluable"
+
+
+def test_file_throughput_uses_successful_samples_and_seconds_ratio(tmp_path):
+    results = [
+        SessionResult("success", "file", completed=True, audio_seconds=3600, processing_seconds=3600),
+        SessionResult("timeout", "file", audio_seconds=36000, error="TimeoutError: timeout"),
+        SessionResult("missing-time", "file", completed=True, audio_seconds=1800),
+    ]
+    report_json, _ = write_report(
+        tmp_path,
+        config={"wall_elapsed_seconds": 3600, "thresholds": {}},
+        results=results,
+        resource_samples=[],
+    )
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    summary = report["summary"]
+    # Processing-hour uses one measured hour; wall-hour includes both successful jobs.
+    assert summary["file_audio_hours_per_processing_hour"] == 1
+    assert summary["file_audio_hours_per_wall_hour"] == 1.5
+    assert summary["processing_seconds"] == 3600
+    assert summary["file_processing_sample_count"] == 1
+    assert summary["file_audio_seconds"] == 5400  # successful jobs only
+    assert summary["file_attempted_audio_seconds"] == 41400
+
+
+def test_file_job_rtf_is_computed_with_audio_duration(monkeypatch, tmp_path):
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return Response({"job_id": "fake-job"})
+
+        async def get(self, *_args, **_kwargs):
+            return Response({"status": "succeeded", "segments": []})
+
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=FakeClient))
+    wav_path = tmp_path / "input.wav"
+    wav_path.write_bytes(b"fake input")
+    result = asyncio.run(run_file_job(
+        path=wav_path,
+        audio_seconds=2.0,
+        base_url="http://asr.invalid",
+        run_id="fake-file",
+        hotword_set_id=None,
+        token=None,
+        poll_seconds=0.001,
+        timeout_seconds=1,
+    ))
+    assert result.completed
+    assert result.audio_seconds == 2.0
+    assert result.rtf is not None and result.rtf > 0
 
 
 def test_report_has_metadata_summary_sessions_and_csv(tmp_path):
