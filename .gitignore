@@ -8,7 +8,11 @@ htmlcov/
 node_modules/
 dist/
 build/
-models/
+models/*
+!models/README.md
+!models/manifest.json
+!models/download.py
+!models/.gitkeep
 data/
 *.onnx
 *.wav
@@ -18,4 +22,3 @@ data/
 *.opus
 .env
 .DS_Store
-

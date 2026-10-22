@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "runtime": {
+    "name": "sherpa-onnx",
+    "version": null,
+    "version_status": "待固定",
+    "reason": "项目依赖版本尚未由 T01 固定；发布前应选择并验证同一版本的 Python 绑定。"
+  },
+  "models": [
+    {
+      "id": "streaming-zipformer-zh-en",
+      "purpose": "online_asr",
+      "architecture": "transducer",
+      "description": "流式 Zipformer 中英候选；具体仓库、文件、版本、许可证需在 P0 按业务音频确认。",
+      "source_url": null,
+      "version": null,
+      "version_status": "待 P0 固定",
+      "files": [],
+      "sha256": null,
+      "checksum_status": "待固定",
+      "hotwords": { "online": true, "offline": false },
+      "enabled": false
+    },
+    {
+      "id": "offline-transducer-zh-en",
+      "purpose": "offline_asr",
+      "architecture": "transducer",
+      "description": "启用热词的离线 Transducer 候选；具体模型和词表须经业务音频验证后固定。",
+      "source_url": null,
+      "version": null,
+      "version_status": "待 P0 固定",
+      "files": [],
+      "sha256": null,
+      "checksum_status": "待固定",
+      "hotwords": { "online": false, "offline": true },
+      "enabled": false
+    },
+    {
+      "id": "sensevoice-zh-en",
+      "purpose": "offline_asr_quality_comparison",
+      "architecture": "sense_voice",
+      "description": "可选质量对照模型；sherpa-onnx SenseVoice 无原生热词配置。",
+      "source_url": null,
+      "version": null,
+      "version_status": "候选，待固定",
+      "files": [],
+      "sha256": null,
+      "checksum_status": "待固定",
+      "hotwords": { "online": false, "offline": false },
+      "enabled": false
+    },
+    {
+      "id": "silero-vad",
+      "purpose": "vad",
+      "architecture": "silero_vad",
+      "description": "Silero VAD 候选。",
+      "source_url": null,
+      "version": null,
+      "version_status": "候选，待固定",
+      "files": [],
+      "sha256": null,
+      "checksum_status": "待固定",
+      "hotwords": { "online": false, "offline": false },
+      "enabled": false
+    },
+    {
+      "id": "speaker-embedding-zh-cn",
+      "purpose": "speaker_embedding",
+      "architecture": "speaker_embedding",
+      "description": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx 候选。",
+      "source_url": null,
+      "version": null,
+      "version_status": "候选，待固定",
+      "files": [],
+      "sha256": null,
+      "checksum_status": "待固定",
+      "hotwords": { "online": false, "offline": false },
+      "enabled": false
+    },
+    {
+      "id": "speaker-segmentation-pyannote-3-0",
+      "purpose": "speaker_diarization",
+      "architecture": "pyannote_segmentation",
+      "description": "sherpa-onnx-pyannote-segmentation-3-0 候选。",
+      "source_url": null,
+      "version": null,
+      "version_status": "候选，待固定",
+      "files": [],
+      "sha256": null,
+      "checksum_status": "待固定",
+      "hotwords": { "online": false, "offline": false },
+      "enabled": false
+    }
+  ]
+}
