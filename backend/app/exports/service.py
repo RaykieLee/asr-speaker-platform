@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unicodedata import category
 
 
 class ExportFormatError(ValueError):
@@ -109,6 +110,13 @@ def _timestamp(seconds: float, *, srt: bool) -> str:
     return f"{hours:02}:{minutes:02}:{secs:02}{separator}{millis:03}"
 
 
+def _safe_label(value: Any) -> str:
+    """Prevent persisted legacy labels from injecting extra export lines."""
+    cleaned = "".join(" " if category(character) in {"Cc", "Zl", "Zp"} else character
+                      for character in str(value))
+    return " ".join(cleaned.split())
+
+
 def render_txt(payload: dict[str, Any]) -> str:
     lines = []
     for segment in payload["segments"]:
@@ -116,7 +124,7 @@ def render_txt(payload: dict[str, Any]) -> str:
         if not text:
             continue
         speaker = segment.get("speaker")
-        label = f"[{speaker['display_name']}] " if speaker else ""
+        label = f"[{_safe_label(speaker['display_name'])}] " if speaker else ""
         lines.append(
             f"[{_timestamp(segment['start_seconds'], srt=False)} --> "
             f"{_timestamp(segment['end_seconds'], srt=False)}] {label}{text}"
@@ -133,7 +141,7 @@ def render_srt(payload: dict[str, Any]) -> str:
         number = len(blocks) + 1
         speaker = segment.get("speaker")
         if speaker:
-            text = f"[{speaker['display_name']}] {text}"
+            text = f"[{_safe_label(speaker['display_name'])}] {text}"
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         blocks.append(
             f"{number}\n{_timestamp(segment['start_seconds'], srt=True)} --> "

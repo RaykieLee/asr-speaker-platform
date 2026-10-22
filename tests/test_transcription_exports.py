@@ -50,22 +50,22 @@ def test_correction_preserves_model_prediction_and_appends_audit(tmp_path):
     try:
         response = client.patch(
             f"/api/v1/transcriptions/{job['id']}/speakers/speaker_0",
-            json={"registered_speaker_id": alice["id"], "display_name": "Corrected Alice",
-                  "operator": "reviewer-1"},
+            json={"registered_speaker_id": alice["id"], "display_name": "Corrected Alice"},
+            headers={"X-Operator": "spoofed-actor"},
         )
         assert response.status_code == 200
         assert response.json()["original_prediction"]["speaker_name"] == "Alice model prediction"
 
         response = client.patch(
             f"/api/v1/transcriptions/{job['id']}/speakers/speaker_0",
-            json={"display_name": "Reviewed Alice", "operator": "reviewer-2"},
+            json={"display_name": "Reviewed Alice"},
         )
         assert response.status_code == 200
         override = database.get_mapping_override(job["id"], "speaker_0")
         assert override["display_name"] == "Reviewed Alice"
-        assert [item["operator"] for item in override["metadata"]["audit_log"][1:]] == [
-            "reviewer-1", "reviewer-2",
-        ]
+        audit = override["metadata"]["audit_log"][1:]
+        assert [item["operator"] for item in audit] == [None, None]
+        assert all(item["actor_verified"] is False for item in audit)
         fetched = client.get(f"/api/v1/transcriptions/{job['id']}").json()
         assert fetched["effective_segments"][0]["speaker"]["display_name"] == "Reviewed Alice"
         assert fetched["segments"][0]["registered_speaker_id"] == alice["id"]
@@ -111,8 +111,28 @@ def test_correction_rejects_unknown_job_speaker_and_person(tmp_path):
         assert client.patch(f"{base}/speaker_9", json={"display_name": "Other"}).status_code == 404
         assert client.patch(f"{base}/speaker_0", json={"registered_speaker_id": "missing"}).status_code == 404
         assert client.patch(f"{base}/speaker_0", json={}).status_code == 422
+        assert client.patch(f"{base}/speaker_0", json={"display_name": "Alice\r\nInjected"}).status_code == 422
+        assert client.patch(f"{base}/speaker_0", json={"display_name": "Alice\u2028Injected"}).status_code == 422
+        assert client.patch(
+            f"{base}/speaker_0", json={"display_name": "Alice", "operator": "spoofed"}
+        ).status_code == 422
         assert client.get(f"/api/v1/transcriptions/missing/export?format=srt").status_code == 404
         assert client.get(f"/api/v1/transcriptions/{job['id']}/export?format=xml").status_code == 422
+    finally:
+        client.close()
+        database.close()
+
+
+def test_legacy_control_characters_cannot_add_export_lines(tmp_path):
+    database, _, job, client = setup_client(tmp_path)
+    try:
+        database.set_mapping_override(job["id"], "speaker_0", display_name="Alice\r\nInjected")
+        txt = client.get(f"/api/v1/transcriptions/{job['id']}/export?format=txt").text
+        srt = client.get(f"/api/v1/transcriptions/{job['id']}/export?format=srt").text
+        assert "[Alice Injected] Hello there" in txt
+        assert "[Alice Injected] Hello there" in srt
+        assert "\r" not in txt + srt
+        assert "\nInjected]" not in txt + srt
     finally:
         client.close()
         database.close()

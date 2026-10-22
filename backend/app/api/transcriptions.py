@@ -4,10 +4,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
+from unicodedata import category
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.exports import build_export_payload, render_json, render_srt, render_txt
 from backend.app.jobs.service import HotwordSnapshotError, TranscriptionService, UploadTooLarge
@@ -20,7 +21,14 @@ class SpeakerCorrection(BaseModel):
 
     registered_speaker_id: str | None = None
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
-    operator: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("display_name")
+    @classmethod
+    def reject_control_characters(cls, value: str | None) -> str | None:
+        if value is not None and any(category(character) in {"Cc", "Zl", "Zp"}
+                                     for character in value):
+            raise ValueError("display_name 不能包含控制符或换行符")
+        return value
 
 
 def _service(request: Request) -> TranscriptionService | None:
@@ -147,18 +155,18 @@ async def correct_transcription_speaker(job_id: str, local_id: str,
             "display_name": prediction.get("speaker_name"),
             "match_status": prediction.get("match_status"),
         })
-    operator = correction.operator or request.headers.get("x-operator") or "api"
     audit.append({
         "at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "action": "manual_correction",
-        "operator": operator,
+        "operator": None,
+        "actor_verified": False,
         "registered_speaker_id": registered_id,
         "display_name": correction.display_name.strip() if correction.display_name else None,
     })
     saved = database.set_mapping_override(
         job_id, local_id, registered_speaker_id=registered_id,
         display_name=correction.display_name.strip() if correction.display_name else None,
-        operator=operator,
+        operator=None,
         metadata={"audit_log": audit},
     )
     return {
