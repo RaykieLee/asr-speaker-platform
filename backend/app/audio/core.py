@@ -149,8 +149,11 @@ def separate_stereo(audio: AudioBuffer) -> tuple[AudioBuffer, AudioBuffer]:
         raise AudioFormatError("stereo separation requires exactly two channels")
     left, right = array.array("f"), array.array("f")
     left.extend(audio.samples[0::2]); right.extend(audio.samples[1::2])
-    return (AudioBuffer(left, audio.sample_rate, 1, audio.source_sample_rate, 1, audio.duration),
-            AudioBuffer(right, audio.sample_rate, 1, audio.source_sample_rate, 1, audio.duration))
+    original_channels = audio.source_channels or audio.channels
+    return (AudioBuffer(left, audio.sample_rate, 1, audio.source_sample_rate,
+                        original_channels, audio.duration),
+            AudioBuffer(right, audio.sample_rate, 1, audio.source_sample_rate,
+                        original_channels, audio.duration))
 
 
 def _resample(audio: AudioBuffer, target_rate: int) -> AudioBuffer:
@@ -188,8 +191,14 @@ def normalize_audio(audio: AudioBuffer, *, sample_rate: int = TARGET_SAMPLE_RATE
 
 
 def decode_audio_file(path: str | Path, *, sample_rate: int = TARGET_SAMPLE_RATE,
-                      channels: int = TARGET_CHANNELS) -> AudioBuffer:
-    """Decode WAV directly; decode other formats via optional FFmpeg to s16le WAV."""
+                      channels: int = TARGET_CHANNELS,
+                      preserve_channels: bool = False) -> AudioBuffer:
+    """Decode an audio file, optionally retaining its original channel layout.
+
+    ``preserve_channels`` is used by separate-microphone transcription. In that
+    mode the decoder still converts sample values to float32, but leaves channel
+    count and source sample rate untouched for the caller to split and normalize.
+    """
     path = Path(path)
     if not path.is_file():
         raise AudioFormatError(f"audio file does not exist: {path}")
@@ -208,4 +217,6 @@ def decode_audio_file(path: str | Path, *, sample_rate: int = TARGET_SAMPLE_RATE
         except (subprocess.CalledProcessError, AudioFormatError) as exc:
             detail = exc.stderr.decode("utf-8", "replace") if isinstance(exc, subprocess.CalledProcessError) else str(exc)
             raise AudioFormatError(f"FFmpeg could not decode {path.name}: {detail}") from exc
+    if preserve_channels:
+        return source
     return normalize_audio(source, sample_rate=sample_rate, channels=channels)

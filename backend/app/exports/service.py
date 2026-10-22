@@ -117,14 +117,33 @@ def _safe_label(value: Any) -> str:
     return " ".join(cleaned.split())
 
 
+def _display_label(segment: dict[str, Any]) -> str:
+    """Combine optional channel and speaker labels without changing mono output."""
+    labels: list[str] = []
+    channel_index = (segment.get("metadata") or {}).get("channel_index")
+    if channel_index is not None and not isinstance(channel_index, bool):
+        try:
+            channel_number = int(channel_index)
+        except (TypeError, ValueError):
+            channel_number = -1
+        if channel_number >= 0:
+            labels.append(f"声道 {channel_number + 1}")
+    speaker = segment.get("speaker")
+    if speaker:
+        labels.append(_safe_label(speaker["display_name"]))
+    if not labels:
+        return ""
+    joined = " · ".join(labels)
+    return f"[{joined}] "
+
+
 def render_txt(payload: dict[str, Any]) -> str:
     lines = []
     for segment in payload["segments"]:
         text = str(segment.get("text", "")).strip()
         if not text:
             continue
-        speaker = segment.get("speaker")
-        label = f"[{_safe_label(speaker['display_name'])}] " if speaker else ""
+        label = _display_label(segment)
         lines.append(
             f"[{_timestamp(segment['start_seconds'], srt=False)} --> "
             f"{_timestamp(segment['end_seconds'], srt=False)}] {label}{text}"
@@ -139,9 +158,9 @@ def render_srt(payload: dict[str, Any]) -> str:
         if not text:
             continue
         number = len(blocks) + 1
-        speaker = segment.get("speaker")
-        if speaker:
-            text = f"[{_safe_label(speaker['display_name'])}] {text}"
+        label = _display_label(segment)
+        if label:
+            text = f"{label}{text}"
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         blocks.append(
             f"{number}\n{_timestamp(segment['start_seconds'], srt=True)} --> "

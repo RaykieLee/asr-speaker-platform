@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from backend.app.audio.core import AudioBuffer, decode_audio_file, normalize_audio
+from backend.app.audio.core import AudioBuffer, AudioFormatError, decode_audio_file, normalize_audio, separate_stereo
 from backend.app.engines.base import EngineConfigError
 
 
@@ -118,16 +118,109 @@ class FileASRService:
         return getattr(self.recognizer, "model_version", None)
 
     def transcribe_file(self, path: str | Path, *, hotwords: list[str | list[str]] | None = None,
+                        channel_mode: str = "mixdown",
                         progress: Callable[[float], None] | None = None) -> FileASRResult:
         if self.recognizer is None:
             raise EngineConfigError("离线 ASR 模型未配置或未安装")
-        audio = decode_audio_file(path)
-        return self.transcribe_audio(audio, hotwords=hotwords, progress=progress)
+        if channel_mode not in {"mixdown", "separate"}:
+            raise ValueError("channel_mode 必须是 mixdown 或 separate")
+        audio = decode_audio_file(path, preserve_channels=channel_mode == "separate")
+        return self.transcribe_audio(audio, hotwords=hotwords, channel_mode=channel_mode,
+                                     progress=progress)
 
     def transcribe_audio(self, source: AudioBuffer, *, hotwords: list[str | list[str]] | None = None,
+                         channel_mode: str = "mixdown",
                          progress: Callable[[float], None] | None = None) -> FileASRResult:
         if self.recognizer is None:
             raise EngineConfigError("离线 ASR 模型未配置或未安装")
+        if channel_mode not in {"mixdown", "separate"}:
+            raise ValueError("channel_mode 必须是 mixdown 或 separate")
+        if channel_mode == "separate":
+            if source.channels != 2:
+                raise AudioFormatError("channel_mode=separate 需要恰好两个声道的音频")
+            left, right = separate_stereo(source)
+            combined: list[ASRSegment] = []
+            mappings: list[dict[str, Any]] = []
+            channel_results: list[FileASRResult] = []
+            for channel_index, channel in enumerate((left, right)):
+                channel_audio = normalize_audio(channel)
+
+                def update_channel_progress(value: float, *, index: int = channel_index) -> None:
+                    if progress:
+                        progress((index + value) / 2)
+
+                result = self.transcribe_audio(
+                    channel_audio, hotwords=hotwords, channel_mode="mixdown",
+                    progress=update_channel_progress,
+                )
+                channel_results.append(result)
+                local_id_map: dict[str, str] = {}
+                for mapping in result.speaker_mappings:
+                    old_local_id = str(mapping["local_speaker_id"])
+                    new_local_id = f"channel_{channel_index}:{old_local_id}"
+                    local_id_map[old_local_id] = new_local_id
+                    mappings.append({**mapping, "local_speaker_id": new_local_id,
+                                     "channel_index": channel_index})
+                for segment in result.segments:
+                    metadata = dict(segment.metadata or {})
+                    metadata["channel_index"] = channel_index
+                    local_id = segment.local_speaker_id
+                    if local_id is not None:
+                        local_id = local_id_map.get(local_id, f"channel_{channel_index}:{local_id}")
+                    combined.append(ASRSegment(
+                        segment_id=0, start=segment.start, end=segment.end, text=segment.text,
+                        local_speaker_id=local_id,
+                        registered_speaker_id=segment.registered_speaker_id,
+                        overlap=segment.overlap, revision=segment.revision, metadata=metadata,
+                    ))
+
+            # Keep one deterministic timeline across both independent microphones.
+            combined.sort(key=lambda segment: (
+                segment.start, segment.end, int((segment.metadata or {}).get("channel_index", 0)),
+            ))
+            channel_zero = [(index, segment) for index, segment in enumerate(combined)
+                            if (segment.metadata or {}).get("channel_index") == 0]
+            channel_one = [(index, segment) for index, segment in enumerate(combined)
+                           if (segment.metadata or {}).get("channel_index") == 1]
+            cross_overlaps: set[int] = set()
+            left_index = right_index = 0
+            while left_index < len(channel_zero) and right_index < len(channel_one):
+                left_pos, left = channel_zero[left_index]
+                right_pos, right = channel_one[right_index]
+                if min(left.end, right.end) > max(left.start, right.start):
+                    cross_overlaps.update((left_pos, right_pos))
+                if left.end <= right.end:
+                    left_index += 1
+                if right.end <= left.end:
+                    right_index += 1
+            for index in cross_overlaps:
+                segment = combined[index]
+                metadata = {**(segment.metadata or {}), "cross_channel_overlap": True}
+                combined[index] = ASRSegment(
+                    segment_id=segment.segment_id, start=segment.start, end=segment.end,
+                    text=segment.text, local_speaker_id=segment.local_speaker_id,
+                    registered_speaker_id=segment.registered_speaker_id,
+                    overlap=True, revision=segment.revision, metadata=metadata,
+                )
+            combined = [ASRSegment(
+                segment_id=index, start=segment.start, end=segment.end, text=segment.text,
+                local_speaker_id=segment.local_speaker_id,
+                registered_speaker_id=segment.registered_speaker_id,
+                overlap=segment.overlap, revision=segment.revision, metadata=segment.metadata,
+            ) for index, segment in enumerate(combined, start=1)]
+            statuses = {result.speaker_diarization for result in channel_results}
+            if statuses <= {"disabled"}:
+                diarization_status = "disabled"
+            elif statuses <= {"no_speech", "disabled"}:
+                diarization_status = "no_speech"
+            elif statuses <= {"unmatched", "no_speech", "disabled"}:
+                diarization_status = "unmatched"
+            else:
+                diarization_status = "completed"
+            if progress:
+                progress(1.0)
+            return FileASRResult(source.duration, tuple(combined), self.model_version,
+                                 diarization_status, tuple(mappings))
         audio = normalize_audio(source)
         if audio.sample_rate != 16_000 or audio.channels != 1:
             raise EngineConfigError("离线 ASR 仅接受标准化的 16000 Hz 单声道音频")

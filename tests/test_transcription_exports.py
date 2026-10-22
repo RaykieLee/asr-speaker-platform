@@ -99,6 +99,45 @@ def test_exports_share_corrected_names_and_timeline(tmp_path):
         assert "00:00:00,200 --> 00:00:01,400" in exported_srt.text
         assert "[张三] Hello there" in exported_srt.text
         assert "00:00:02,000 --> 00:00:03,750" in exported_srt.text
+        assert "声道" not in exported_txt.text + exported_srt.text
+    finally:
+        client.close()
+        database.close()
+
+
+def test_stereo_txt_and_srt_keep_interleaved_channel_and_speaker_labels(tmp_path):
+    database, alice, job, client = setup_client(tmp_path)
+    bob = database.create_speaker("Bob")
+    try:
+        database.update_job(job["id"], result_metadata={
+            "duration": 3.75,
+            "speaker_diarization": "completed",
+            "speaker_mappings": [
+                {"local_speaker_id": "speaker_0", "registered_speaker_id": alice["id"],
+                 "speaker_name": "Alice", "match_status": "matched", "channel_index": 0},
+                {"local_speaker_id": "speaker_1", "registered_speaker_id": bob["id"],
+                 "speaker_name": "Bob", "match_status": "matched", "channel_index": 1},
+            ],
+        })
+        database.upsert_segment(job["id"], 1, 0.2, 1.4, "Hello there",
+                                local_speaker_id="speaker_0", registered_speaker_id=alice["id"],
+                                metadata={"channel_index": 0})
+        database.upsert_segment(job["id"], 2, 2.0, 3.75, "Goodbye",
+                                local_speaker_id="speaker_0", registered_speaker_id=alice["id"],
+                                metadata={"channel_index": 0})
+        database.upsert_segment(job["id"], 3, 1.0, 1.6, "Middle turn",
+                                local_speaker_id="speaker_1", registered_speaker_id=bob["id"],
+                                metadata={"channel_index": 1})
+
+        txt = client.get(f"/api/v1/transcriptions/{job['id']}/export?format=txt")
+        srt = client.get(f"/api/v1/transcriptions/{job['id']}/export?format=srt")
+        assert txt.status_code == srt.status_code == 200
+        txt_lines = txt.text.splitlines()
+        assert "[00:00:00.200 --> 00:00:01.400] [声道 1 · Alice] Hello there" == txt_lines[0]
+        assert "[00:00:01.000 --> 00:00:01.600] [声道 2 · Bob] Middle turn" == txt_lines[1]
+        assert "[00:00:02.000 --> 00:00:03.750] [声道 1 · Alice] Goodbye" == txt_lines[2]
+        assert srt.text.index("[声道 1 · Alice] Hello there") < srt.text.index("[声道 2 · Bob] Middle turn")
+        assert srt.text.index("[声道 2 · Bob] Middle turn") < srt.text.index("[声道 1 · Alice] Goodbye")
     finally:
         client.close()
         database.close()

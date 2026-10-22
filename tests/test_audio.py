@@ -52,6 +52,19 @@ def test_wav_decode_stereo_mix_and_separate():
     assert list(mono.samples) == pytest.approx([(32767 / 32768 - 1) / 2, 0.25])
 
 
+def test_file_decode_can_preserve_stereo_source_for_separate_processing(tmp_path):
+    from backend.app.audio.core import decode_audio_file
+
+    path = tmp_path / "stereo.wav"
+    path.write_bytes(make_wav([12000, -9000] * 1001, rate=24000, channels=2))
+    decoded = decode_audio_file(path, preserve_channels=True)
+
+    assert decoded.sample_rate == 24000
+    assert decoded.channels == 2
+    assert decoded.frame_count == 1001
+    assert decoded.duration == pytest.approx(1001 / 24000)
+
+
 def test_wav_normalization_preserves_source_duration_and_timestamps():
     source = decode_wav(make_wav([0] * 1001, rate=24000))
     normalized = normalize_audio(source)
