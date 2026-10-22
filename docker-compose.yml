@@ -1,0 +1,26 @@
+services:
+  asr:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      ASR_ONLINE_MODEL_DIR: /models/online-small
+      ASR_OFFLINE_MODEL_DIR: /models/offline-multi
+      ASR_SPEAKER_MODEL_PATH: /models/speaker/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+      ASR_SPEAKER_MODEL_VERSION: 3dspeaker-eres2net-base-zh-cn-v1
+      ASR_DIARIZATION_MODEL_PATH: /models/diarization/model.int8.onnx
+      ASR_DATA_DIR: /data
+    volumes:
+      - ./models/online-small:/models/online-small:ro
+      - ./models/offline-multi:/models/offline-multi:ro
+      - ./models/speaker:/models/speaker:ro
+      - ./models/diarization:/models/diarization:ro
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
