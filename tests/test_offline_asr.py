@@ -120,6 +120,8 @@ def test_sherpa_adapter_uses_official_stream_hotword_interface(tmp_path, monkeyp
     calls = {}
 
     class FakeStream:
+        result = SimpleNamespace(text="real fake-boundary result")
+
         def accept_waveform(self, rate, samples):
             calls["audio"] = (rate, list(samples))
 
@@ -130,9 +132,6 @@ def test_sherpa_adapter_uses_official_stream_hotword_interface(tmp_path, monkeyp
 
         def decode_stream(self, stream):
             calls["decoded"] = stream
-
-        def get_result(self, stream):
-            return SimpleNamespace(text="real fake-boundary result")
 
     class Offline:
         @staticmethod
@@ -145,10 +144,12 @@ def test_sherpa_adapter_uses_official_stream_hotword_interface(tmp_path, monkeyp
     files = OfflineTransducerFiles(*paths[1:])
     adapter = SherpaOfflineRecognizer.load(model, files, decoding_method="modified_beam_search")
     assert adapter.transcribe([0.1, -0.1], 16_000, ["李子熙", "项目名"]) == "real fake-boundary result"
-    assert calls["hotwords"] == "李子熙\n项目名"
+    assert calls["hotwords"] == "李 子 熙/项 目 名"
     assert calls["audio"] == (16_000, [0.1, -0.1])
     assert calls["configuration"]["decoding_method"] == "modified_beam_search"
     assert adapter.model_version == "offline-v2"
+    adapter.transcribe([0.1], 16_000, [["Open", "AI"], ["project", "name"]])
+    assert calls["hotwords"] == "Open AI/project name"
 
     greedy = SherpaOfflineRecognizer(FakeRecognizer())
     greedy.decoding_method = "greedy_search"
@@ -158,13 +159,17 @@ def test_sherpa_adapter_uses_official_stream_hotword_interface(tmp_path, monkeyp
 
 def test_upload_persists_hotword_snapshot_and_query_returns_segments(tmp_path):
     database, files = make_storage(tmp_path)
-    hotword_set = database.create_hotword_set("names", ["李子熙"])
+    hotword_set = database.create_hotword_set(
+        "names", ["李子熙"],
+        compiled={"entries": [{"text": "李子熙", "tokens": ["李", "子", "熙"]}]},
+    )
 
     async def resolve(set_id):
         assert set_id == hotword_set["set_id"]
         return database.get_hotword_version(set_id)
 
-    asr = FileASRService(FakeRecognizer())
+    recognizer = FakeRecognizer()
+    asr = FileASRService(recognizer)
     service = TranscriptionService(database, files, asr, hotword_resolver=resolve)
     app = FastAPI()
     app.include_router(router)
@@ -180,7 +185,8 @@ def test_upload_persists_hotword_snapshot_and_query_returns_segments(tmp_path):
             job = service.worker.wait(created["job_id"], timeout=3)
             assert job["status"] == "succeeded"
             assert job["hotword_version"] == 1
-            assert job["options"]["hotwords"] == ["李子熙"]
+            assert job["options"]["hotwords"] == [["李", "子", "熙"]]
+            assert recognizer.calls[0][2] == [["李", "子", "熙"]]
             assert job["model_version"] == "fake-offline-v1"
             assert files.exists(job["file_path"])
             queried = client.get(created["status_url"])

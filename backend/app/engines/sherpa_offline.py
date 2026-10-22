@@ -60,17 +60,35 @@ class SherpaOfflineRecognizer:
         return adapter
 
     def transcribe(self, samples: Any, sample_rate: int,
-                   hotwords: list[str] | None = None) -> str:
+                   hotwords: list[str | list[str]] | None = None) -> str:
         if sample_rate != 16_000:
             raise EngineConfigError("离线识别输入必须为 16000 Hz")
         if hotwords and self.decoding_method != "modified_beam_search":
             raise EngineConfigError("离线 Transducer 热词要求 modified_beam_search")
+        encoded_hotwords = self._format_hotwords(hotwords) if hotwords else None
         try:
-            stream = (self._recognizer.create_stream(hotwords="\n".join(hotwords))
-                      if hotwords else self._recognizer.create_stream())
+            stream = (self._recognizer.create_stream(hotwords=encoded_hotwords)
+                      if encoded_hotwords else self._recognizer.create_stream())
             stream.accept_waveform(sample_rate, samples)
             self._recognizer.decode_stream(stream)
-            result = self._recognizer.get_result(stream)
+            result = stream.result
         except Exception as exc:
             raise RuntimeError(f"sherpa 离线识别失败: {exc}") from exc
         return str(getattr(result, "text", result)).strip()
+
+    @staticmethod
+    def _format_hotwords(hotwords: list[str | list[str]]) -> str:
+        """Encode tokenized phrases in sherpa's ``TOKEN TOKEN/OTHER`` format."""
+        phrases: list[str] = []
+        for hotword in hotwords:
+            if isinstance(hotword, str):
+                tokens = hotword.split() if any(char.isspace() for char in hotword) else list(hotword)
+            else:
+                tokens = hotword
+            clean_tokens = [str(token).strip() for token in tokens]
+            if not clean_tokens or any(not token for token in clean_tokens):
+                raise EngineConfigError("热词必须包含一个或多个非空模型 token")
+            phrases.append(" ".join(clean_tokens))
+        if not phrases:
+            raise EngineConfigError("热词列表不能为空")
+        return "/".join(phrases)

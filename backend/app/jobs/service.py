@@ -26,21 +26,42 @@ class HotwordSnapshotError(ValueError):
 _ALLOWED_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm", ".mp4", ".aac"}
 
 
-def _resolve_hotword_value(resolved: Any) -> tuple[list[str], int]:
+def _resolve_hotword_value(resolved: Any) -> tuple[list[str | list[str]], int]:
+    if hasattr(resolved, "as_dict"):
+        resolved = resolved.as_dict()
     if isinstance(resolved, Mapping):
-        words, version = resolved.get("entries", resolved.get("hotwords")), resolved.get("version")
+        version = resolved.get("version")
+        compiled = resolved.get("compiled")
+        if isinstance(compiled, Mapping) and compiled.get("entries"):
+            token_entries = [entry.get("tokens") for entry in compiled["entries"]
+                             if isinstance(entry, Mapping)]
+            words: Any = token_entries
+        else:
+            words = resolved.get("entries", resolved.get("hotwords"))
     else:
         try:
             words, version = resolved
         except (TypeError, ValueError) as exc:
             raise HotwordSnapshotError("热词解析器必须返回词条和版本") from exc
     if isinstance(words, list) and words and isinstance(words[0], Mapping):
-        words = [entry.get("word") for entry in words if entry.get("enabled", True)]
-    if not isinstance(words, (list, tuple)) or any(not isinstance(word, str) or not word.strip() for word in words):
+        phrases: list[Any] = []
+        for entry in words:
+            if not entry.get("enabled", True):
+                continue
+            phrases.append(entry.get("word"))
+            phrases.extend(entry.get("aliases", []))
+        words = phrases
+    if not isinstance(words, (list, tuple)) or any(
+        not ((isinstance(word, str) and word.strip()) or
+             (isinstance(word, (list, tuple)) and word and
+              all(isinstance(token, str) and token.strip() for token in word)))
+        for word in words
+    ):
         raise HotwordSnapshotError("热词集内容无效")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise HotwordSnapshotError("热词集版本必须是正整数")
-    return [word.strip() for word in words], version
+    return [([token.strip() for token in word] if isinstance(word, (list, tuple)) else word.strip())
+            for word in words], version
 
 
 class TranscriptionService:
@@ -71,7 +92,7 @@ class TranscriptionService:
         if not language or len(language) > 32:
             raise ValueError("language 必须是 1 到 32 个字符")
 
-        hotwords: list[str] = []
+        hotwords: list[str | list[str]] = []
         hotword_version: int | None = None
         if hotword_set_id is not None:
             if not isinstance(hotword_set_id, str) or not hotword_set_id.strip():

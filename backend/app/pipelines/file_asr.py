@@ -13,7 +13,7 @@ class OfflineRecognizer(Protocol):
     model_version: str | None
 
     def transcribe(self, samples: Any, sample_rate: int,
-                   hotwords: list[str] | None = None) -> str: ...
+                   hotwords: list[str | list[str]] | None = None) -> str: ...
 
 
 class DiarizationProvider(Protocol):
@@ -108,14 +108,14 @@ class FileASRService:
     def model_version(self) -> str | None:
         return getattr(self.recognizer, "model_version", None)
 
-    def transcribe_file(self, path: str | Path, *, hotwords: list[str] | None = None,
+    def transcribe_file(self, path: str | Path, *, hotwords: list[str | list[str]] | None = None,
                         progress: Callable[[float], None] | None = None) -> FileASRResult:
         if self.recognizer is None:
             raise EngineConfigError("离线 ASR 模型未配置或未安装")
         audio = decode_audio_file(path)
         return self.transcribe_audio(audio, hotwords=hotwords, progress=progress)
 
-    def transcribe_audio(self, source: AudioBuffer, *, hotwords: list[str] | None = None,
+    def transcribe_audio(self, source: AudioBuffer, *, hotwords: list[str | list[str]] | None = None,
                          progress: Callable[[float], None] | None = None) -> FileASRResult:
         if self.recognizer is None:
             raise EngineConfigError("离线 ASR 模型未配置或未安装")
