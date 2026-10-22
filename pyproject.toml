@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools==75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asr-speaker-platform"
+version = "0.1.0"
+description = "本地部署的语音识别与说话人识别平台"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi==0.115.12",
+    "uvicorn[standard]==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx==0.28.1",
+    "pytest==8.3.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
