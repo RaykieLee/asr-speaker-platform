@@ -55,9 +55,17 @@ class AudioBuffer:
         return self.source_duration_seconds if self.source_duration_seconds is not None else self.frame_count / self.sample_rate
 
     def timestamp_for_frame(self, frame: int) -> float:
-        """Return the source-relative time of a frame, clamped to valid boundaries."""
+        """Return a frame's source-relative time, including the exact EOF boundary.
+
+        Resampling rounds the output frame count to an integer. Consequently the
+        regular output grid can end a fraction of a sample before/after source EOF.
+        Treat ``frame_count`` as the exclusive end boundary and anchor it to the
+        original duration so segment endpoints do not drift on export.
+        """
         if frame < 0 or frame > self.frame_count:
             raise IndexError("frame outside audio buffer")
+        if frame == self.frame_count:
+            return self.duration
         return frame / self.sample_rate
 
 

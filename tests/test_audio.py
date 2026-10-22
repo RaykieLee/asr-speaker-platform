@@ -59,7 +59,11 @@ def test_wav_normalization_preserves_source_duration_and_timestamps():
     assert normalized.channels == 1
     assert normalized.frame_count == round(1001 * 16000 / 24000)
     assert normalized.duration == pytest.approx(1001 / 24000)
+    assert normalized.timestamp_for_frame(0) == 0
+    assert normalized.timestamp_for_frame(normalized.frame_count - 1) == pytest.approx(666 / 16000)
     assert normalized.timestamp_for_frame(normalized.frame_count) == pytest.approx(1001 / 24000)
+    with pytest.raises(IndexError):
+        normalized.timestamp_for_frame(normalized.frame_count + 1)
 
 
 def test_wav_tail_is_retained_after_resampling():
