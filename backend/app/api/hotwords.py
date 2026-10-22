@@ -14,9 +14,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.engines import EngineConfigError, HotwordsUnsupportedError
-from app.hotwords.compiler import HotwordCompilationError, HotwordVocabularyUnavailableError
-from app.hotwords.service import (
+from backend.app.engines import EngineConfigError, HotwordsUnsupportedError
+from backend.app.hotwords.compiler import HotwordCompilationError, HotwordVocabularyUnavailableError
+from backend.app.hotwords.service import (
     HotwordNotFoundError,
     HotwordService,
     StaleHotwordVersionError,

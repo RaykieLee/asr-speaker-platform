@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from app.engines import HotwordsUnsupportedError, capabilities_for
+from backend.app.engines import HotwordsUnsupportedError, capabilities_for
 
 
 class HotwordCompilationError(ValueError):

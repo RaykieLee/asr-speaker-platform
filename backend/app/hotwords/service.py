@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
 
-from app.engines import HotwordsUnsupportedError
-from app.hotwords.compiler import HotwordCompilationError, HotwordCompiler
-from app.storage import SQLiteStore
+from backend.app.engines import HotwordsUnsupportedError
+from backend.app.hotwords.compiler import HotwordCompilationError, HotwordCompiler
+from backend.app.storage import SQLiteStore
 
 MAX_HOTWORD_WEIGHT = 20.0
 MAX_WORD_LENGTH = 256

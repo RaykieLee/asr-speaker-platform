@@ -5,7 +5,7 @@ from .compiler import (
     HotwordCompiler,
     HotwordVocabularyUnavailableError,
 )
-from app.engines import HotwordsUnsupportedError
+from backend.app.engines import HotwordsUnsupportedError
 from .service import HotwordNotFoundError, HotwordService, HotwordSnapshot, StaleHotwordVersionError
 
 __all__ = [

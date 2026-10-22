@@ -4,16 +4,22 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.hotwords import router
-from app.engines import HotwordsUnsupportedError
-from app.hotwords import (
+from backend.app.api.hotwords import router
+from backend.app.engines import HotwordsUnsupportedError
+from backend.app.hotwords import (
     HotwordCompilationError,
     HotwordCompiler,
     HotwordService,
     HotwordVocabularyUnavailableError,
     StaleHotwordVersionError,
 )
-from app.storage import SQLiteStore
+from backend.app.storage import SQLiteStore
+
+
+def test_production_package_import_path():
+    from backend.app.api.hotwords import router as production_router
+
+    assert production_router.prefix == "/api/v1/hotword-sets"
 
 
 def _service(tmp_path, *, architecture="transducer", decoding_method="modified_beam_search", modeling_unit="cjkchar", vocabulary=None):
