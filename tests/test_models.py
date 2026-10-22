@@ -11,7 +11,7 @@ from backend.app.engines import (
     capabilities_for,
 )
 from models.download import DownloadError, download_model
-from backend.app.engines.sherpa_online import SherpaOnlineRecognizer
+from backend.app.engines.sherpa_online import OnlineTransducerFiles, SherpaOnlineRecognizer
 
 
 def test_online_dynamic_hotwords_use_sherpa_separator():
@@ -23,6 +23,16 @@ def test_online_dynamic_hotwords_use_sherpa_separator():
     assert adapter.create_stream(["你 好", "项 目"]) == "你 好/项 目"
     with pytest.raises(EngineConfigError):
         adapter.create_stream(["甲/乙"])
+
+
+def test_online_bpe_model_requires_vocabulary_before_loading(tmp_path):
+    paths = [tmp_path / name for name in ("encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt")]
+    for path in paths:
+        path.write_bytes(b"placeholder")
+    artifact = ModelArtifact("online", "transducer", "v1", tuple(paths))
+    files = OnlineTransducerFiles(*paths)
+    with pytest.raises(EngineConfigError, match="bpe_vocab"):
+        SherpaOnlineRecognizer.load(artifact, files, modeling_unit="cjkchar+bpe")
 
 
 def test_transducer_hotword_capabilities_are_mode_specific():
