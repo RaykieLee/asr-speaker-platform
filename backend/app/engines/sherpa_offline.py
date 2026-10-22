@@ -88,6 +88,9 @@ class SherpaOfflineRecognizer:
             clean_tokens = [str(token).strip() for token in tokens]
             if not clean_tokens or any(not token for token in clean_tokens):
                 raise EngineConfigError("热词必须包含一个或多个非空模型 token")
+            if any("/" in token or any(char.isspace() for char in token)
+                   for token in clean_tokens):
+                raise EngineConfigError("热词 token 含有动态热词格式保留字符")
             phrases.append(" ".join(clean_tokens))
         if not phrases:
             raise EngineConfigError("热词列表不能为空")

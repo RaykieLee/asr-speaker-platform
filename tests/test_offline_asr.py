@@ -157,6 +157,13 @@ def test_sherpa_adapter_uses_official_stream_hotword_interface(tmp_path, monkeyp
         greedy.transcribe([0.0], 16_000, ["term"])
 
 
+def test_offline_hotword_format_rejects_unrepresentable_tokens():
+    with pytest.raises(EngineConfigError, match="保留字符"):
+        SherpaOfflineRecognizer._format_hotwords([["hello/world"]])
+    with pytest.raises(EngineConfigError, match="保留字符"):
+        SherpaOfflineRecognizer._format_hotwords([["hello world"]])
+
+
 def test_upload_persists_hotword_snapshot_and_query_returns_segments(tmp_path):
     database, files = make_storage(tmp_path)
     hotword_set = database.create_hotword_set(
