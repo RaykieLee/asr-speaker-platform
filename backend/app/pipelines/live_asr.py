@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from backend.app.audio.core import pcm_s16le_to_float32
 from backend.app.engines.base import EngineConfigError
+from backend.app.speakers.live_diarization import LiveSpeakerTracker
 
 
 class LiveProtocolError(ValueError):
@@ -46,7 +47,8 @@ class LiveASRSession:
     """Owns one recognizer stream; recognizer/model weights may be shared."""
 
     def __init__(self, recognizer: OnlineRecognizer, *, session_id: str | None = None,
-                 options: StartOptions | None = None):
+                 options: StartOptions | None = None,
+                 speaker_tracker: LiveSpeakerTracker | None = None):
         self.recognizer = recognizer
         self.session_id = session_id or f"sess_{uuid.uuid4().hex}"
         self.options = options or StartOptions()
@@ -57,6 +59,8 @@ class LiveASRSession:
         self.last_text = ""
         self.segment_start = 0.0
         self.closed = False
+        self.speaker_tracker = speaker_tracker or LiveSpeakerTracker()
+        self.last_segment_event: dict[str, Any] | None = None
 
     @property
     def duration(self) -> float:
@@ -81,13 +85,17 @@ class LiveASRSession:
         self.samples_seen += len(samples)
         end = self.duration
         self.stream.accept_waveform(self.options.sample_rate, samples)
-        return self._decode(start, end, final=False)
+        speaker_changes = self.speaker_tracker.feed(samples, self.samples_seen)
+        events = self._decode(start, end, final=False)
+        events.extend(self._speaker_revision(change) for change in speaker_changes)
+        return events
 
     def finish(self) -> list[dict[str, Any]]:
         if self.closed:
             return []
         self.closed = True
         self.stream.input_finished()
+        self.speaker_tracker.flush(self.samples_seen)
         return self._decode(self.duration, self.duration, final=True)
 
     def _decode(self, start: float, end: float, *, final: bool) -> list[dict[str, Any]]:
@@ -99,7 +107,10 @@ class LiveASRSession:
         should_finalize = (endpoint and bool(text)) or (final and bool(text))
         if should_finalize:
             self.revision += 1
-            events.append(self._event("final", text, start=self.segment_start, end=end))
+            event = self._event("final", text, start=self.segment_start, end=end)
+            self._apply_speaker(event)
+            events.append(event)
+            self.last_segment_event = None
             self.last_text = ""
             if not final:
                 self.segment_id += 1
@@ -108,20 +119,49 @@ class LiveASRSession:
                 self.stream = self.recognizer.create_stream(list(self.options.hotwords) or None)
         elif text and text != self.last_text:
             self.revision += 1
-            events.append(self._event("partial", text, start=self.segment_start, end=end))
+            event = self._event("partial", text, start=self.segment_start, end=end)
+            self._apply_speaker(event)
+            events.append(event)
+            self.last_segment_event = event
             self.last_text = text
         return events
+
+    def _apply_speaker(self, event: dict[str, Any]) -> None:
+        speaker = self.speaker_tracker._as_dict(self.speaker_tracker.current)
+        event.update(speaker)
+
+    def _speaker_revision(self, change: dict[str, Any]) -> dict[str, Any]:
+        """Revise the displayed segment in place after a confirmed boundary."""
+        current = self.last_segment_event
+        if current is None:
+            return {"type": "speaker_change", "session_id": self.session_id, **change}
+        self.revision = max(self.revision, int(current["revision"])) + 1
+        corrected = dict(current)
+        corrected.update(change["speaker"])
+        corrected.update(type="segment", status="corrected", revision=self.revision,
+                         end=max(float(current["end"]), float(change["end"])),
+                         speaker_change_at=change["start"])
+        self.last_segment_event = corrected
+        return corrected
 
 
 class LiveASRService:
     """Factory seam used by the API and fake recognizers in tests."""
 
-    def __init__(self, recognizer: OnlineRecognizer, *, queue_size: int = 16, hotword_resolver: Any = None):
+    def __init__(self, recognizer: OnlineRecognizer, *, queue_size: int = 16,
+                 hotword_resolver: Any = None, vad: Any = None,
+                 speaker_extractor: Any = None, speaker_matcher: Any = None,
+                 speaker_profiles: Any = (), speaker_options: dict[str, Any] | None = None):
         if queue_size < 1:
             raise ValueError("queue_size must be positive")
         self.recognizer = recognizer
         self.queue_size = queue_size
         self.hotword_resolver = hotword_resolver
+        self.vad = vad
+        self.speaker_extractor = speaker_extractor
+        self.speaker_matcher = speaker_matcher
+        self.speaker_profiles = speaker_profiles
+        self.speaker_options = speaker_options or {}
 
     async def create_session(self, options: StartOptions | None = None) -> LiveASRSession:
         if options and options.hotword_set_id and not self.hotword_resolver:
@@ -141,7 +181,11 @@ class LiveASRService:
             options = StartOptions(sample_rate=options.sample_rate, format=options.format,
                                    hotwords=tuple(word.strip() for word in words), hotword_set_id=options.hotword_set_id,
                                    hotword_set_version=version)
-        return LiveASRSession(self.recognizer, options=options)
+        tracker = LiveSpeakerTracker(vad=self.vad, extractor=self.speaker_extractor,
+                                     matcher=self.speaker_matcher, profiles=self.speaker_profiles,
+                                     sample_rate=options.sample_rate if options else 16_000,
+                                     **self.speaker_options)
+        return LiveASRSession(self.recognizer, options=options, speaker_tracker=tracker)
 
     def create_queue(self) -> asyncio.Queue[bytes | None]:
         return asyncio.Queue(maxsize=self.queue_size)
