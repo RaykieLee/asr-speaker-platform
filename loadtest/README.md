@@ -32,6 +32,16 @@ python -m loadtest --base-url http://asr-host:8000 \
 
 每次运行产生 `report.json` 和 `sessions.csv`。报告包含配置、机器元数据、输入文件名与 SHA-256、每会话开始时间和 ID、首个 partial、最终文本及说话人时间、错误类型、已发送帧数、客户端发送积压/迟发帧、服务端显式报告的丢帧（如果协议提供）、文件队列/处理耗时、RTF、P50/P95/P99、资源采样以及门槛。文件队列时长优先使用服务端 `queue_seconds`；若服务端没有该字段，则取客户端首次观察到 `running` 的时间作为队列结束近似值。处理时长优先使用服务端 `processing_seconds`；否则按首次观察到 `running` 至终态的客户端时间估算。文件处理小时吞吐使用“成功且处理时长大于零的音频秒数 ÷ 同一批处理秒数”；墙钟小时吞吐使用“成功任务音频秒数 ÷ 整轮墙钟秒数”。秒/秒即小时/小时的比值，失败任务不进入吞吐分子；缺失的处理时长不会按零补入分母。报告含最终转写文本和说话人信息，需按录音数据的保密要求存放与分享。
 
+可将已生成的 `report.json` 转成不依赖网络和额外 Python 包的离线 HTML 图表：
+
+```bash
+python -m loadtest.plot results/2026-10-23-realtime/report.json
+# 可选指定输出路径
+python -m loadtest.plot results/2026-10-23-realtime/report.json --output results/summary.html
+```
+
+默认在 JSON 旁生成 `report.html`。图表包含 CPU/RSS 随采样时间的曲线、按并发档位和负载模式计算的成功率、关键时延 P50/P95 表及 P95 图。缺少资源样本或某项时延时标为“不可评估”，不补零。HTML 不包含会话原始转写文本。
+
 服务端没有报告 `dropped_frames` 时，`server_dropped_frames` 保持 `null`，不按零处理。客户端 `client_late_frames` 仅表示发送端落后于音频时间线，不能代替服务端丢帧计数。没有收到 partial/speaker 时延值时，分位数按可观测样本计算；不可观测延迟不会伪造为零。分位数采用线性插值定义。`gates` 给出已设置门槛的 pass/fail/not_evaluable 状态；任何关键指标未知都会使整体状态至少为 not_evaluable。
 
 客户端机器元数据包含系统版本、架构、处理器描述、逻辑 CPU、内存总量（psutil 可用时）和 Python 版本。压测目标机的信息通过 `--target-os`、`--target-cpu-model`、`--target-cpu-cores`、`--target-memory-bytes`、`--target-gpu-model`、`--target-gpu-memory-bytes` 记录；模型版本、推理线程数、Worker 数、热词数量和音频特征也有对应 CLI 参数。未提供的值保留为空，不能误认为客户端配置代表服务端配置。
@@ -51,3 +61,9 @@ python -m pytest tests/test_loadtest.py
 ```
 
 这些测试验证帧节奏、分位数、错误聚合和报告格式，不会连接服务端或作为性能测试结果。
+
+图表解析和输出测试同样只读本地 JSON，不启动模型或压测：
+
+```bash
+python -m pytest tests/test_loadtest_plot.py
+```
