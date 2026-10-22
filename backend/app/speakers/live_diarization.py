@@ -120,6 +120,12 @@ class LiveSpeakerTracker:
         try:
             vector = _normalize(self.extractor.extract(audio))  # type: ignore[union-attr]
             rows = self.profiles() if callable(self.profiles) else self.profiles
+            extractor_version = getattr(self.extractor, "model_version", None)
+            if extractor_version:
+                # Unknown-version profiles cannot be safely compared either:
+                # embeddings from different model releases are not compatible.
+                rows = [row for row in rows
+                        if row.get("model_version") == extractor_version]
             result = self.matcher(vector, rows)  # type: ignore[misc]
         except Exception:
             return None

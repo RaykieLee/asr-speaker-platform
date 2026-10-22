@@ -2,7 +2,7 @@ import array
 
 from backend.app.audio import AudioBuffer
 from backend.app.pipelines.live_asr import LiveASRSession, StartOptions
-from backend.app.speakers.live_diarization import LiveSpeakerTracker
+from backend.app.speakers.live_diarization import LiveSpeakerTracker, profile_cosine_matcher
 
 
 class FakeVAD:
@@ -69,7 +69,8 @@ def tracker(**kwargs):
     return LiveSpeakerTracker(
         vad=kwargs.get("vad", FakeVAD()), extractor=kwargs.get("extractor", FakeExtractor()),
         matcher=kwargs.get("matcher", fake_match),
-        profiles=[{"id": "registered_a", "name": "甲"}, {"id": "registered_b", "name": "乙"}],
+        profiles=[{"id": "registered_a", "name": "甲", "model_version": "fake-v1"},
+                  {"id": "registered_b", "name": "乙", "model_version": "fake-v1"}],
         window_seconds=1, step_seconds=0.5, min_speech_seconds=0.5,
         min_dwell_seconds=0.5, confirmations=2,
     )
@@ -108,6 +109,34 @@ def test_missing_speaker_models_never_invent_registered_identity():
     assert state.feed(array.array("f", [0.5] * 16_000), 16_000) == []
     assert state.current.registered_speaker_id is None
     assert state.current.speaker_name is None
+
+
+def test_old_model_profile_is_not_used_for_live_identity():
+    class VersionedExtractor(FakeExtractor):
+        model_version = "model-v2"
+
+    state = LiveSpeakerTracker(
+        vad=FakeVAD(), extractor=VersionedExtractor(),
+        matcher=profile_cosine_matcher(min_similarity=0.8, min_margin=0.05),
+        profiles=[{"id": "old-profile", "name": "旧版本用户",
+                   "embedding": [1.0, 0.0], "model_version": "model-v1"}],
+        window_seconds=0.5, step_seconds=0.25, min_speech_seconds=0.25,
+        min_dwell_seconds=0.25, confirmations=1,
+    )
+
+    state.feed(array.array("f", [0.2] * 8_000), 8_000)
+
+    assert state.current.registered_speaker_id is None
+    assert state.current.speaker_name is None
+
+
+def test_profile_matcher_rejects_embedding_dimension_mismatch():
+    matcher = profile_cosine_matcher(min_similarity=0.8, min_margin=0.05)
+
+    result = matcher([1.0, 0.0], [{"id": "wrong-dimension", "name": "不应匹配",
+                                   "embedding": [1.0, 0.0, 0.0]}])
+
+    assert result is None
 
 
 def test_confirmed_switch_emits_higher_revision_for_same_segment_id():
