@@ -4,6 +4,7 @@ import math
 import wave
 
 import pytest
+from fastapi.testclient import TestClient
 
 from backend.app.audio import decode_wav
 from backend.app.speakers import (
@@ -12,6 +13,7 @@ from backend.app.speakers import (
     assess_audio_quality, l2_normalize,
 )
 from backend.app.storage import FileStore, SQLiteStore
+from backend.app.main import app as production_app
 
 
 class TestExtractor:
@@ -46,6 +48,22 @@ def setup_service(tmp_path, extractor=None):
     database.initialize()
     files = FileStore(tmp_path / "objects")
     return database, files, SpeakerRegistrationService(database, files, extractor)
+
+
+def test_production_app_registers_and_persists_speaker_routes(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASR_DATA_DIR", str(tmp_path))
+    with TestClient(production_app) as client:
+        created = client.post("/api/v1/speakers", json={"name": "测试人员"})
+        assert created.status_code == 200
+        speaker_id = created.json()["id"]
+        assert client.get(f"/api/v1/speakers/{speaker_id}").status_code == 200
+        unavailable = client.post(
+            f"/api/v1/speakers/{speaker_id}/samples",
+            files={"file": ("sample.wav", tone(), "audio/wav")},
+        )
+        assert unavailable.status_code == 503
+    with TestClient(production_app) as client:
+        assert client.get(f"/api/v1/speakers/{speaker_id}").json()["name"] == "测试人员"
 
 
 def test_quality_rejects_silence_short_and_clipped_samples():
