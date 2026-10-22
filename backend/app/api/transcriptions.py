@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from backend.app.jobs.service import HotwordSnapshotError, TranscriptionService, UploadTooLarge
+from backend.app.jobs.service import HotwordSnapshotError, JobQueueFull, TranscriptionService, UploadTooLarge
 
 router = APIRouter()
 
@@ -59,6 +59,8 @@ async def create_transcription(request: Request) -> Any:
         )
     except UploadTooLarge as exc:
         return _error(413, "upload_too_large", str(exc), request_id)
+    except JobQueueFull as exc:
+        return _error(429, "queue_full", str(exc), request_id)
     except HotwordSnapshotError as exc:
         return _error(422, "hotword_snapshot_failed", str(exc), request_id)
     except ValueError as exc:

@@ -1,11 +1,13 @@
 """FastAPI application entry point."""
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 
+from backend.app.api.auth import api_key_middleware
 from backend.app.api.hotwords import router as hotwords_router
 from backend.app.api.speakers import router as speakers_router
 from backend.app.api.stream import router as stream_router
@@ -91,6 +93,11 @@ async def lifespan(application: FastAPI):
     database.initialize()
     files = FileStore(data_dir / "files")
     try:
+        application.state.active_streams = 0
+        application.state.stream_lock = asyncio.Lock()
+        application.state.max_streams = int(os.environ.get("ASR_MAX_STREAMS", "16"))
+        if application.state.max_streams < 1:
+            raise EngineConfigError("ASR_MAX_STREAMS 必须为正整数")
         application.state.live_asr_service = None
         application.state.hotword_service = None
         application.state.transcription_service = None
@@ -160,6 +167,8 @@ async def lifespan(application: FastAPI):
                                                speaker_matcher=speaker_matcher),
                 hotword_resolver=lambda set_id: offline_hotwords.resolve(set_id, mode="offline"),
                 max_workers=int(os.environ.get("ASR_FILE_WORKERS", "1")),
+                max_upload_bytes=int(os.environ.get("ASR_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))),
+                max_pending_jobs=int(os.environ.get("ASR_MAX_PENDING_JOBS", "32")),
             )
         yield
     finally:
@@ -174,6 +183,7 @@ app = FastAPI(
     description="本地部署的语音识别与说话人识别服务。",
     lifespan=lifespan,
 )
+app.middleware("http")(api_key_middleware)
 app.include_router(stream_router)
 app.include_router(speakers_router)
 app.include_router(hotwords_router)
@@ -184,3 +194,18 @@ app.include_router(transcriptions_router)
 def health() -> dict[str, str]:
     """Return a lightweight process health response."""
     return {"status": "ok"}
+
+
+@app.get("/api/v1/status", tags=["health"])
+def service_status() -> dict:
+    return {
+        "online_asr": app.state.live_asr_service is not None,
+        "offline_asr": app.state.transcription_service is not None,
+        "speaker_embedding": app.state.speaker_registration_service.extractor is not None,
+        "file_diarization": (
+            app.state.transcription_service is not None
+            and app.state.transcription_service.asr.diarizer is not None
+        ),
+        "active_streams": app.state.active_streams,
+        "max_streams": app.state.max_streams,
+    }

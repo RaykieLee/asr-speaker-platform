@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from backend.app.api.auth import authorized_websocket
 from backend.app.audio.core import PCMFormatError
 from backend.app.engines.base import EngineConfigError
 from backend.app.pipelines.live_asr import LiveASRService, LiveProtocolError, parse_start_message
@@ -49,6 +50,12 @@ async def stream_asr(websocket: WebSocket) -> None:
             start_data = json.loads(first["text"])
         except json.JSONDecodeError as exc:
             raise LiveProtocolError("start 消息不是有效 JSON") from exc
+        if not isinstance(start_data, dict):
+            raise LiveProtocolError("start 消息必须是 JSON 对象")
+        if not authorized_websocket(websocket, start_data):
+            await _error(websocket, "unauthorized", "API Key 无效或未提供", request_id)
+            await websocket.close(code=1008)
+            return
         options = parse_start_message(start_data)
         session = await service.create_session(options)
     except EngineConfigError as exc:
@@ -63,6 +70,18 @@ async def stream_asr(websocket: WebSocket) -> None:
         await _error(websocket, "recognition_error", str(exc), request_id)
         await websocket.close(code=1011)
         return
+
+    state = websocket.app.state
+    if getattr(state, "stream_lock", None) is None:
+        state.stream_lock = asyncio.Lock()
+        state.active_streams = 0
+        state.max_streams = 16
+    async with state.stream_lock:
+        if state.active_streams >= state.max_streams:
+            await _error(websocket, "capacity_exceeded", "实时连接已达到上限", request_id)
+            await websocket.close(code=1013)
+            return
+        state.active_streams += 1
 
     await websocket.send_json({
         "type": "started", "protocol_version": 1, "session_id": session.session_id,
@@ -145,6 +164,8 @@ async def stream_asr(websocket: WebSocket) -> None:
         await _error(websocket, "recognition_error", str(exc), request_id)
         await websocket.close(code=1011)
     finally:
+        async with state.stream_lock:
+            state.active_streams -= 1
         if receive_task is not None and not receive_task.done():
             receive_task.cancel()
         if not worker_task.done():

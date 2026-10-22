@@ -1,6 +1,7 @@
 """Upload, hotword snapshot and query operations for transcription jobs."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import uuid
@@ -17,6 +18,10 @@ from .worker import JobWorker
 
 class UploadTooLarge(ValueError):
     """An upload exceeds the configured per-file limit."""
+
+
+class JobQueueFull(RuntimeError):
+    """The configured number of queued and running jobs is already reached."""
 
 
 class HotwordSnapshotError(ValueError):
@@ -70,14 +75,18 @@ class TranscriptionService:
     def __init__(self, database: SQLiteStore, files: FileStore, asr: FileASRService, *,
                  hotword_resolver: Callable[[str], Any] | None = None,
                  max_upload_bytes: int = 512 * 1024 * 1024,
-                 max_workers: int = 1):
+                 max_workers: int = 1, max_pending_jobs: int = 32):
         if max_upload_bytes < 1:
             raise ValueError("max_upload_bytes must be positive")
+        if max_pending_jobs < 1:
+            raise ValueError("max_pending_jobs must be positive")
         self.database = database
         self.files = files
         self.asr = asr
         self.hotword_resolver = hotword_resolver
         self.max_upload_bytes = max_upload_bytes
+        self.max_pending_jobs = max_pending_jobs
+        self._submit_lock = asyncio.Lock()
         self.worker = JobWorker(database, files, asr, max_workers=max_workers)
         self.worker.start()
 
@@ -123,18 +132,23 @@ class TranscriptionService:
             "snapshot_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
         model_version = self.asr.model_version
-        self.files.write(relative_path, content)
-        try:
-            job = self.database.create_job(
-                job_id=job_id, file_path=relative_path, checksum=checksum,
-                hotword_set_id=hotword_set_id, hotword_version=hotword_version,
-                options=options, model_version=model_version,
-            )
-        except Exception:
-            self.files.delete(relative_path)
-            raise
-        self.worker.enqueue(job_id)
-        return job
+        async with self._submit_lock:
+            active_count = sum(len(self.database.list_jobs(status=status, limit=self.max_pending_jobs))
+                               for status in ("queued", "running"))
+            if active_count >= self.max_pending_jobs:
+                raise JobQueueFull("文件任务队列已满，请稍后重试")
+            self.files.write(relative_path, content)
+            try:
+                job = self.database.create_job(
+                    job_id=job_id, file_path=relative_path, checksum=checksum,
+                    hotword_set_id=hotword_set_id, hotword_version=hotword_version,
+                    options=options, model_version=model_version,
+                )
+            except Exception:
+                self.files.delete(relative_path)
+                raise
+            self.worker.enqueue(job_id)
+            return job
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job = self.database.get_job(job_id)
