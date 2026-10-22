@@ -22,6 +22,23 @@ def test_production_package_import_path():
     assert production_router.prefix == "/api/v1/hotword-sets"
 
 
+def test_dynamic_stream_hotwords_format_and_reserved_separator():
+    compiler = HotwordCompiler(lambda text: list(text), vocabulary=set("张三先生李梅AB"))
+    compiled = compiler.compile(
+        [{"word": "张三", "aliases": ["张先生"]}, {"word": "李梅"}], 2.5
+    )
+    assert compiled["stream_hotwords"] == "张 三/张 先 生/李 梅"
+    assert compiled["hotwords_file_content"] == "张三\n张先生\n李梅\n"
+    with pytest.raises(HotwordCompilationError, match="分隔符"):
+        compiler.compile([{"word": "A/B"}], 2.5)
+
+
+def test_dynamic_stream_hotwords_reject_unrepresentable_tokens():
+    compiler = HotwordCompiler(lambda _: ["A/B"], vocabulary={"A/B"})
+    with pytest.raises(HotwordCompilationError, match="保留字符"):
+        compiler.compile([{"word": "AB"}], 2.5)
+
+
 def _service(tmp_path, *, architecture="transducer", decoding_method="modified_beam_search", modeling_unit="cjkchar", vocabulary=None):
     store = SQLiteStore(tmp_path / "hotwords.sqlite3")
     store.initialize()

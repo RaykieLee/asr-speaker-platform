@@ -84,6 +84,10 @@ class HotwordCompiler:
                 key = normalized.casefold()
                 if not normalized or key in seen:
                     continue
+                if "/" in normalized:
+                    raise HotwordCompilationError(
+                        f"热词 {normalized!r} 包含保留分隔符 '/'，不能用于动态 stream 热词。"
+                    )
                 seen.add(key)
                 try:
                     tokens = tuple(str(token) for token in self.tokenizer(normalized))
@@ -94,6 +98,10 @@ class HotwordCompiler:
                 if not tokens or any(not token for token in tokens):
                     raise HotwordCompilationError(
                         f"热词 {normalized!r} 没有有效 token；请检查模型词表覆盖。"
+                    )
+                if any("/" in token or any(char.isspace() for char in token) for token in tokens):
+                    raise HotwordCompilationError(
+                        f"热词 {normalized!r} 的模型 token 含有动态热词格式保留字符。"
                     )
                 missing = [token for token in tokens if token not in self.vocabulary]
                 if missing:
@@ -117,5 +125,6 @@ class HotwordCompiler:
             "modeling_unit": self.modeling_unit,
             "weight": float(weight),
             "hotwords_file_content": "\n".join(item["text"] for item in compiled_entries) + "\n",
+            "stream_hotwords": "/".join(" ".join(item["tokens"]) for item in compiled_entries),
             "entries": compiled_entries,
         }
