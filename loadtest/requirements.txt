@@ -1,0 +1,3 @@
+# Standalone loadtest client dependencies; does not change backend dependencies.
+httpx>=0.27,<1
+websockets>=13,<16
