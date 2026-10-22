@@ -142,9 +142,12 @@ class FileASRService:
         diarized = self.diarizer.segment(audio)
         diarized = self._normalize_diarization_ranges(diarized, audio.duration)
         if not diarized:
-            if progress:
-                progress(1.0)
-            return FileASRResult(audio.duration, (), self.model_version, "no_speech", ())
+            # Diarization can miss speech even when the recognizer can still
+            # recover it. Preserve the transcript and leave speaker identity
+            # unset instead of treating an empty diarization result as silence.
+            segments = self._transcribe_plain(audio, hotwords=hotwords, progress=progress)
+            return FileASRResult(audio.duration, tuple(segments), self.model_version,
+                                 "no_speech", ())
 
         mappings = self.speaker_matcher.match(audio, diarized) if self.speaker_matcher else {}
         local_ids = list(dict.fromkeys(item["local_speaker_id"] for item in diarized))

@@ -186,6 +186,19 @@ def test_file_asr_without_diarizer_marks_disabled_not_pending():
     assert result.speaker_diarization == "disabled"
 
 
+def test_empty_diarization_falls_back_to_plain_transcription():
+    """A diarizer miss must not discard otherwise recognizable audio."""
+    recognizer = FakeRecognizer("speech that the diarizer missed")
+    diarizer = SimpleNamespace(segment=lambda _: [])
+
+    result = FileASRService(recognizer, diarizer=diarizer).transcribe_audio(audio(2.0))
+
+    assert result.text == "speech that the diarizer missed"
+    assert result.segments
+    assert result.segments[0].local_speaker_id is None
+    assert result.speaker_diarization == "no_speech"
+
+
 def test_job_persists_diarization_status_and_mapping(tmp_path):
     samples = array.array("h", [1000] * 16000)
     buffer = io.BytesIO()
