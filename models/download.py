@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 import sys
 import tarfile
 import urllib.request
@@ -54,14 +56,37 @@ def _checked_target(root: Path, relative: object, label: str) -> Path:
     target = root.joinpath(*safe.parts)
     if not target.resolve().is_relative_to(root):
         raise DownloadError(f"非法模型文件路径: {label}")
+    if target.is_symlink():
+        raise DownloadError(f"拒绝符号链接模型目标: {label}")
     return target
 
 
 def _matches(path: Path, expected: str, size: int | None = None) -> bool:
     try:
-        return path.is_file() and (size is None or path.stat().st_size == size) and digest(path) == expected
+        info = path.lstat()
+        return stat.S_ISREG(info.st_mode) and (size is None or info.st_size == size) and digest(path) == expected
     except OSError:
         return False
+
+
+def _create_partial(partial: Path) -> BinaryIO:
+    """Create a private temporary file without following a preexisting path."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(partial, flags, 0o600)
+    except FileExistsError as exc:
+        raise DownloadError(f"临时文件已存在，拒绝覆盖: {partial}") from exc
+    return os.fdopen(fd, "wb")
+
+
+def _check_replace_target(target: Path) -> None:
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(info.st_mode):
+        raise DownloadError(f"拒绝覆盖非普通文件模型目标: {target}")
 
 
 def _copy_verified(source: BinaryIO, target: Path, expected: str, *,
@@ -70,8 +95,11 @@ def _copy_verified(source: BinaryIO, target: Path, expected: str, *,
     partial = target.with_name(target.name + ".part")
     sha = hashlib.sha256()
     size = 0
+    created = False
     try:
-        with partial.open("wb") as output:
+        output = _create_partial(partial)
+        created = True
+        with output:
             while chunk := source.read(_CHUNK_SIZE):
                 output.write(chunk)
                 sha.update(chunk)
@@ -81,29 +109,36 @@ def _copy_verified(source: BinaryIO, target: Path, expected: str, *,
         actual = sha.hexdigest()
         if actual != expected:
             raise DownloadError(f"{target.name} SHA-256 不匹配: 期望 {expected}，实际 {actual}。")
+        _check_replace_target(target)
         partial.replace(target)
         return target
     finally:
-        partial.unlink(missing_ok=True)
+        if created:
+            partial.unlink(missing_ok=True)
 
 
 def _download_to_cache(url: str, target: Path, expected: str) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(target.name + ".part")
     sha = hashlib.sha256()
+    created = False
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "asr-model-fetch/2.0"})
-        with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as output:
+        output = _create_partial(partial)
+        created = True
+        with urllib.request.urlopen(request, timeout=120) as response, output:
             while chunk := response.read(_CHUNK_SIZE):
                 output.write(chunk)
                 sha.update(chunk)
         actual = sha.hexdigest()
         if actual != expected:
             raise DownloadError(f"{target.name} SHA-256 不匹配: 期望 {expected}，实际 {actual}。")
+        _check_replace_target(target)
         partial.replace(target)
         return target
     finally:
-        partial.unlink(missing_ok=True)
+        if created:
+            partial.unlink(missing_ok=True)
 
 
 def _source_file(source: dict, cache_dir: Path) -> Path:
