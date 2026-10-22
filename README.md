@@ -1,6 +1,8 @@
-# ASR and speaker recognition platform
+# 声笺：本地 ASR 与说话人识别平台
 
-A local FastAPI service for streaming transcription, file transcription, speaker diarization and registration, and hotword sets. The backend requires Python 3.11 and the models listed in [`models/manifest.json`](models/manifest.json). Model binaries and recordings are downloaded or supplied locally; they are excluded from Git and the container image.
+基于 FastAPI 与 sherpa-onnx 的本地语音服务，支持 WebSocket 流式识别、异步文件转写、热词集编辑、声纹注册及说话人分段。提供无需前端构建的网页 Demo 和并发压测工具。总体设计见 [详细设计与实施计划.md](详细设计与实施计划.md)，实施进度见 [TASKS.md](TASKS.md)。
+
+后端需要 Python 3.11 和 [`models/manifest.json`](models/manifest.json) 中固定版本的模型。模型权重、录音、声纹样本和运行数据均保存在本机，排除在 Git 与容器镜像之外。模型来源、校验与许可说明见 [models/README.md](models/README.md)。
 
 ## macOS setup
 
@@ -31,7 +33,26 @@ uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 
 The version value above labels the selected embedding artifact in stored profiles. Keep it unchanged for those profile vectors; if you replace the model, set a new version and re-enroll profiles. The service stores the SQLite database and uploaded audio under `ASR_DATA_DIR`.
 
-Open <http://127.0.0.1:8000/health> for the health check and <http://127.0.0.1:8000/docs> for the API.
+打开 [健康检查](http://127.0.0.1:8000/health) 或 [交互式 API 文档](http://127.0.0.1:8000/docs)。
+
+## 网页 Demo
+
+在另一个终端运行 `node frontend/server.mjs`，打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)。页面可进行实时录音、上传文件、查看说话人时间轴、下载 JSON/TXT/SRT、管理声纹人员和编辑版本化热词。若后端使用了其他端口，设置 `ASR_BACKEND_URL=http://127.0.0.1:端口` 后启动网页代理；若设置了 `ASR_API_TOKEN`，在页面顶部填写相同的 token。详见 [frontend/README.md](frontend/README.md)。
+
+运行 `python demo/prepare_samples.py` 可从本机已验证的模型归档中生成两声音流程样本，再按 [demo/README.md](demo/README.md) 完成演示。样本是流程检查资料，不能代替业务录音的准确率评估。
+
+## 压测与容量
+
+压测工具支持实时、文件及混合负载，并输出会话、延迟、错误、进程 CPU 和内存 JSON/CSV 报告。输入必须为单声道 16 kHz PCM16 WAV。示例：
+
+```bash
+python -m loadtest --base-url http://127.0.0.1:8000 \
+  --wav path/to/authorized-16k-mono.wav --mode realtime \
+  --concurrency 1,2,4,8 --frame-ms 100 --repeats 60 \
+  --server-pid <服务进程 PID> --output data/baseline/my-run
+```
+
+参数、验收门槛及报告字段见 [loadtest/README.md](loadtest/README.md)。本机基线见 [reports/mac-baseline-2026-10-23.md](reports/mac-baseline-2026-10-23.md)；目标部署机器上的并发容量须在相同模型、代表性录音、热词和声纹规模下重新测量。
 
 ## Linux container setup
 
@@ -48,16 +69,17 @@ docker compose up --build
 
 The compose service mounts model directories read-only and persists state in `./data`. The published port binds to `127.0.0.1:8000` by default. Model weights are not copied into the Docker image. To serve other machines, place the service behind the deployment's authentication and TLS layer and change the host port binding deliberately.
 
-## Model and license notes
+## 模型与许可
 
-See [`models/README.md`](models/README.md) for model provenance, exact SHA-256 pins, download behavior, and license review guidance. The model pins identify the tested files; they do not grant permission to redistribute those files. The Pyannote model's upstream archive includes a `LICENSE` file, which the downloader preserves alongside the model.
+模型清单固定了测试文件的来源与 SHA-256，但不授予再分发许可。下载器保留 Pyannote 归档中的 LICENSE；使用前应核对各模型的适用许可，详见 [models/README.md](models/README.md)。
 
-## Development
+## 开发验证
 
 Run the test suite with:
 
 ```bash
 python -m pytest
+node --test frontend/logic.test.mjs
 ```
 
-The runtime package and development tools are pinned in `pyproject.toml` and `uv.lock`.
+运行依赖与开发工具锁定在 `pyproject.toml` 和 `uv.lock`。后端 HTTP/WebSocket 接口及返回结构以运行时 `/docs` 和实现为准。
