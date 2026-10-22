@@ -41,6 +41,16 @@ def test_download_refuses_unpinned_candidate(tmp_path: Path):
     assert not list(tmp_path.iterdir())
 
 
+def test_download_rejects_non_string_checksum_without_traceback(tmp_path: Path):
+    model = {
+        "id": "invalid-checksum",
+        "files": [{"name": "model.onnx", "url": "https://example.invalid/model", "sha256": 123}],
+    }
+    with pytest.raises(DownloadError, match="SHA-256 格式无效"):
+        download_model(model, tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
 def test_download_verifies_before_renaming(tmp_path: Path, monkeypatch):
     import models.download as downloader
 

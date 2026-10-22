@@ -39,9 +39,11 @@ def download_model(model: dict, destination: Path = ROOT) -> list[Path]:
     results: list[Path] = []
     for item in artifacts:
         url, filename, expected = item.get("url"), item.get("name"), item.get("sha256")
-        if not url or not filename or not expected:
+        if not url or not filename or expected is None or expected == "":
             raise DownloadError(f"{model_id} 的下载项缺少 URL、文件名或 SHA-256，拒绝下载。")
-        if len(expected) != 64 or any(c not in "0123456789abcdefABCDEF" for c in expected):
+        if not isinstance(expected, str) or len(expected) != 64 or any(
+            c not in "0123456789abcdefABCDEF" for c in expected
+        ):
             raise DownloadError(f"{model_id}/{filename} 的 SHA-256 格式无效。")
         target = (destination / model_id / filename).resolve()
         if not target.is_relative_to(destination.resolve()):
