@@ -25,6 +25,8 @@ from backend.app.speakers.service import (
     SpeakerRegistrationService,
 )
 from backend.app.speakers.live_diarization import profile_cosine_matcher
+from backend.app.speakers.diarization import SherpaOfflineDiarizer
+from backend.app.speakers.matching import SpeakerMatcher
 from backend.app.speakers.vad import EnergyVAD
 from backend.app.storage import FileStore, SQLiteStore, StorageService
 
@@ -141,8 +143,21 @@ async def lifespan(application: FastAPI):
             offline_hotwords = _hotword_service(database, directory, mode="offline", bpe_model=bpe_model)
             if not online_dir:
                 application.state.hotword_service = offline_hotwords
+            diarization_path = os.environ.get("ASR_DIARIZATION_MODEL_PATH")
+            if diarization_path and not model_path:
+                raise EngineConfigError("配置离线说话人分段时还需要 ASR_SPEAKER_MODEL_PATH")
+            diarizer = SherpaOfflineDiarizer.load(
+                diarization_path, model_path,
+                num_threads=int(os.environ.get("ASR_DIARIZATION_THREADS", "2")),
+            ) if diarization_path and model_path else None
+            speaker_matcher = SpeakerMatcher(
+                database, extractor,
+                min_similarity=float(os.environ.get("ASR_FILE_SPEAKER_MIN_SIMILARITY", "0.55")),
+                min_margin=float(os.environ.get("ASR_FILE_SPEAKER_MIN_MARGIN", "0.05")),
+            ) if diarizer is not None and extractor is not None else None
             application.state.transcription_service = TranscriptionService(
-                database, files, FileASRService(recognizer),
+                database, files, FileASRService(recognizer, diarizer=diarizer,
+                                               speaker_matcher=speaker_matcher),
                 hotword_resolver=lambda set_id: offline_hotwords.resolve(set_id, mode="offline"),
                 max_workers=int(os.environ.get("ASR_FILE_WORKERS", "1")),
             )
