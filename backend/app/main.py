@@ -24,6 +24,8 @@ from backend.app.speakers.service import (
     SpeakerModel,
     SpeakerRegistrationService,
 )
+from backend.app.speakers.live_diarization import profile_cosine_matcher
+from backend.app.speakers.vad import EnergyVAD
 from backend.app.storage import FileStore, SQLiteStore, StorageService
 
 
@@ -69,6 +71,17 @@ def _resolved_stream_words(service: HotwordService, set_id: str) -> tuple[list[s
     return words, snapshot.version
 
 
+def _speaker_profiles(database: SQLiteStore) -> list[dict]:
+    profiles = []
+    for speaker in database.list_speakers(status="active"):
+        profile = database.get_speaker_profile(speaker["id"])
+        if profile and profile.get("embedding"):
+            profiles.append({"id": speaker["id"], "name": speaker["name"],
+                             "embedding": profile["embedding"],
+                             "model_version": profile["model_version"]})
+    return profiles
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     data_dir = Path(os.environ.get("ASR_DATA_DIR", "data")).expanduser()
@@ -105,7 +118,14 @@ async def lifespan(application: FastAPI):
             online_hotwords = _hotword_service(database, directory, mode="online", bpe_model=bpe_model)
             application.state.hotword_service = online_hotwords
             application.state.live_asr_service = LiveASRService(
-                recognizer, hotword_resolver=lambda set_id: _resolved_stream_words(online_hotwords, set_id)
+                recognizer, hotword_resolver=lambda set_id: _resolved_stream_words(online_hotwords, set_id),
+                vad=EnergyVAD() if extractor is not None else None,
+                speaker_extractor=extractor,
+                speaker_matcher=profile_cosine_matcher(
+                    min_similarity=float(os.environ.get("ASR_LIVE_SPEAKER_MIN_SIMILARITY", "0.55")),
+                    min_margin=float(os.environ.get("ASR_LIVE_SPEAKER_MIN_MARGIN", "0.05")),
+                ) if extractor is not None else None,
+                speaker_profiles=lambda: _speaker_profiles(database),
             )
 
         offline_dir = os.environ.get("ASR_OFFLINE_MODEL_DIR")
