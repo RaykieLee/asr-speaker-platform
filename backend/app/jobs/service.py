@@ -1,9 +1,9 @@
 """Upload, hotword snapshot and query operations for transcription jobs."""
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import inspect
+import threading
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -86,7 +86,7 @@ class TranscriptionService:
         self.hotword_resolver = hotword_resolver
         self.max_upload_bytes = max_upload_bytes
         self.max_pending_jobs = max_pending_jobs
-        self._submit_lock = asyncio.Lock()
+        self._submit_lock = threading.RLock()
         self.worker = JobWorker(database, files, asr, max_workers=max_workers)
         self.worker.start()
 
@@ -132,7 +132,7 @@ class TranscriptionService:
             "snapshot_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
         model_version = self.asr.model_version
-        async with self._submit_lock:
+        with self._submit_lock:
             active_count = sum(len(self.database.list_jobs(status=status, limit=self.max_pending_jobs))
                                for status in ("queued", "running"))
             if active_count >= self.max_pending_jobs:
@@ -162,8 +162,16 @@ class TranscriptionService:
         return job
 
     def retry_job(self, job_id: str) -> dict[str, Any] | None:
-        self.worker.retry(job_id)
-        return self.get_job(job_id)
+        with self._submit_lock:
+            job = self.database.get_job(job_id)
+            if job is None or job["status"] != "failed":
+                return self.get_job(job_id)
+            active_count = sum(len(self.database.list_jobs(status=status, limit=self.max_pending_jobs))
+                               for status in ("queued", "running"))
+            if active_count >= self.max_pending_jobs:
+                raise JobQueueFull("文件任务队列已满，请稍后重试")
+            self.worker.retry(job_id)
+            return self.get_job(job_id)
 
     def close(self, *, wait: bool = True) -> None:
         self.worker.close(wait=wait)

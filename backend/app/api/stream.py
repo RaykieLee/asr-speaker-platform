@@ -83,12 +83,19 @@ async def stream_asr(websocket: WebSocket) -> None:
             return
         state.active_streams += 1
 
-    await websocket.send_json({
-        "type": "started", "protocol_version": 1, "session_id": session.session_id,
-        "hotword_set_id": session.options.hotword_set_id,
-        "hotword_set_version": session.options.hotword_set_version,
-    })
-    audio_queue: asyncio.Queue[bytes | None] = service.create_queue()
+    try:
+        await websocket.send_json({
+            "type": "started", "protocol_version": 1, "session_id": session.session_id,
+            "hotword_set_id": session.options.hotword_set_id,
+            "hotword_set_version": session.options.hotword_set_version,
+        })
+        audio_queue: asyncio.Queue[bytes | None] = service.create_queue()
+    except BaseException as exc:
+        async with state.stream_lock:
+            state.active_streams -= 1
+        if isinstance(exc, WebSocketDisconnect):
+            return
+        raise
     send_lock = asyncio.Lock()
 
     async def send_json(data: dict[str, Any]) -> None:

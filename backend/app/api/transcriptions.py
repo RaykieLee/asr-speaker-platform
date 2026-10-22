@@ -216,5 +216,8 @@ async def retry_transcription(job_id: str, request: Request) -> Any:
         return _error(404, "job_not_found", "转写任务不存在", request_id)
     if job["status"] != "failed":
         return _error(409, "job_not_retryable", "只有失败任务可以重试", request_id)
-    retry = service.retry_job(job_id)
+    try:
+        retry = service.retry_job(job_id)
+    except JobQueueFull as exc:
+        return _error(429, "queue_full", str(exc), request_id)
     return {"job_id": job_id, "status": retry["status"] if retry else "queued"}
