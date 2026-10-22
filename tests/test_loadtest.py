@@ -124,6 +124,8 @@ def test_file_throughput_uses_successful_samples_and_seconds_ratio(tmp_path):
 
 
 def test_file_job_rtf_is_computed_with_audio_duration(monkeypatch, tmp_path):
+    captured = {}
+
     class Response:
         def __init__(self, body):
             self.body = body
@@ -135,8 +137,8 @@ def test_file_job_rtf_is_computed_with_audio_duration(monkeypatch, tmp_path):
             return self.body
 
     class FakeClient:
-        def __init__(self, **_kwargs):
-            pass
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
 
         async def __aenter__(self):
             return self
@@ -144,11 +146,16 @@ def test_file_job_rtf_is_computed_with_audio_duration(monkeypatch, tmp_path):
         async def __aexit__(self, *_args):
             return None
 
-        async def post(self, *_args, **_kwargs):
+        async def post(self, *_args, **kwargs):
+            captured["post"] = kwargs
             return Response({"job_id": "fake-job"})
 
         async def get(self, *_args, **_kwargs):
-            return Response({"status": "succeeded", "segments": []})
+            return Response({"status": "succeeded", "segments": [{"text": "旧文本", "local_speaker_id": "speaker_0"}],
+                             "effective_segments": [{"text": "新文本", "speaker": {"display_name": "示例甲"}}],
+                             "created_at": "2026-10-23T00:00:00+00:00",
+                             "started_at": "2026-10-23T00:00:00.250+00:00",
+                             "finished_at": "2026-10-23T00:00:01.250+00:00"})
 
     monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=FakeClient))
     wav_path = tmp_path / "input.wav"
@@ -166,6 +173,12 @@ def test_file_job_rtf_is_computed_with_audio_duration(monkeypatch, tmp_path):
     assert result.completed
     assert result.audio_seconds == 2.0
     assert result.rtf is not None and result.rtf > 0
+    assert result.queue_seconds == 0.25
+    assert result.processing_seconds == 1.0
+    assert result.final_text == "新文本"
+    assert result.speaker == "示例甲"
+    assert captured["client"]["trust_env"] is False
+    assert captured["post"]["data"]["channel_mode"] == "mixdown"
 
 
 def test_report_has_metadata_summary_sessions_and_csv(tmp_path):

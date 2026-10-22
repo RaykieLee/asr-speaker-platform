@@ -40,6 +40,20 @@ def write_repeated_wav(path: Path, pcm: bytes, repeats: int) -> None:
         wav.writeframes(b"")
 
 
+def _server_elapsed(job: dict[str, Any], start_key: str, end_key: str) -> float | None:
+    """Use durable server timestamps when polling misses a short job state."""
+    start, end = job.get(start_key), job.get(end_key)
+    if not start or not end:
+        return None
+    try:
+        first = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        last = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        elapsed = (last - first).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    return elapsed if elapsed >= 0 else None
+
+
 def ws_url(base_url: str) -> str:
     parsed = urlparse(base_url)
     scheme = "wss" if parsed.scheme == "https" else "ws"
@@ -231,8 +245,11 @@ async def run_file_job(
     )
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout_seconds) as client:
-            data: dict[str, str] = {"language": "auto", "channel_mode": "mono"}
+        # A benchmark must reach the requested server directly. In particular,
+        # macOS system proxies can otherwise intercept localhost uploads.
+        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), headers=headers,
+                                     timeout=timeout_seconds, trust_env=False) as client:
+            data: dict[str, str] = {"language": "auto", "channel_mode": "mixdown"}
             if hotword_set_id:
                 data["hotword_set_id"] = hotword_set_id
             with path.open("rb") as source:
@@ -263,14 +280,23 @@ async def run_file_job(
                 if state in {"succeeded", "completed", "complete"}:
                     ended = time.monotonic()
                     result.completed = True
+                    server_queue = _server_elapsed(job, "created_at", "started_at")
+                    if server_queue is not None:
+                        result.queue_seconds = server_queue
                     if job.get("processing_seconds") is not None:
                         result.processing_seconds = float(job["processing_seconds"])
+                    elif (server_processing := _server_elapsed(job, "started_at", "finished_at")) is not None:
+                        result.processing_seconds = server_processing
                     elif running_at is not None:
                         result.processing_seconds = ended - running_at
                     result.rtf = (ended - started) / result.audio_seconds if result.audio_seconds else None
-                    segments = job.get("segments", [])
+                    segments = job.get("effective_segments") or job.get("segments", [])
                     result.final_text = "".join(str(segment.get("text", "")) for segment in segments)
-                    speakers = [segment.get("speaker_name") or segment.get("registered_speaker_id") or segment.get("local_speaker_id") for segment in segments]
+                    speakers = [(segment.get("speaker") or {}).get("display_name")
+                                or segment.get("speaker_name")
+                                or (segment.get("metadata") or {}).get("speaker_name")
+                                or segment.get("registered_speaker_id")
+                                or segment.get("local_speaker_id") for segment in segments]
                     result.speaker = ", ".join(dict.fromkeys(str(value) for value in speakers if value))
                     break
                 if state in {"failed", "error", "cancelled", "canceled"}:
