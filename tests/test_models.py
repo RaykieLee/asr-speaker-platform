@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.engines import (
+from backend.app.engines import (
     EngineConfigError,
     HotwordsUnsupportedError,
     MissingModelError,
@@ -11,6 +11,18 @@ from app.engines import (
     capabilities_for,
 )
 from models.download import DownloadError, download_model
+from backend.app.engines.sherpa_online import SherpaOnlineRecognizer
+
+
+def test_online_dynamic_hotwords_use_sherpa_separator():
+    class FakeRecognizer:
+        def create_stream(self, hotwords=None):
+            return hotwords
+
+    adapter = SherpaOnlineRecognizer(FakeRecognizer())
+    assert adapter.create_stream(["你 好", "项 目"]) == "你 好/项 目"
+    with pytest.raises(EngineConfigError):
+        adapter.create_stream(["甲/乙"])
 
 
 def test_transducer_hotword_capabilities_are_mode_specific():

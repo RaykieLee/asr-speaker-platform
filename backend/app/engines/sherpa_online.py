@@ -58,7 +58,9 @@ class SherpaOnlineRecognizer:
         if hotwords and not hasattr(self._recognizer, "create_stream"):
             raise EngineConfigError("当前 sherpa-onnx 不支持 create_stream 热词接口")
         if hotwords:
-            return self._recognizer.create_stream(hotwords="\n".join(hotwords))
+            if any("/" in item or "\n" in item for item in hotwords):
+                raise EngineConfigError("热词 token 序列不能包含 '/' 或换行")
+            return self._recognizer.create_stream(hotwords="/".join(hotwords))
         return self._recognizer.create_stream()
 
     def is_ready(self, stream: Any) -> bool:
