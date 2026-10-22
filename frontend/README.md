@@ -18,12 +18,15 @@ node frontend/server.mjs
 
 打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)。代理默认转发到 `http://127.0.0.1:8000`，可通过 `ASR_BACKEND_URL` 修改；界面也可以填写其他服务地址。麦克风权限要求 localhost 或 HTTPS。
 
+后端设置了 `ASR_API_TOKEN` 时，可在页面顶部填写同一个 token。HTTP 请求会使用 Bearer 认证，实时 WebSocket 会在首条 `start` 消息中发送 token。token 只保存在当前标签页的 session storage 中。
+
 ## 模型和功能状态
 
 前端只连接项目 API，不会下载模型。根据后端配置启动相应能力：
 
 - 实时识别需要 online ASR 模型及其配置。
 - 文件转写需要 offline ASR 模型及其配置。上传后页面会轮询任务状态，并按服务返回的时间轴、转写片段和说话人标记展示。
+- 文件结果支持使用后端导出 API 下载 JSON、TXT、SRT，包含当前有效的说话人标记。
 - 声纹人员可以在服务可用时创建；样本质量检查和 profile 生成需要 speaker embedding 模型。
 - 热词方案使用后端的版本化编译和模型词表兼容检查。
 - 声纹分段需要 diarization 模型；没有模型时服务应明确返回 disabled/unavailable，不会由界面推测说话人。
@@ -37,4 +40,3 @@ node frontend/server.mjs
 ```sh
 node --test frontend/logic.test.mjs
 ```
-

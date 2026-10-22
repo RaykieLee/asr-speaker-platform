@@ -36,6 +36,8 @@
         <div class="topbar-actions">
           <label class="endpoint-label" for="api-origin">服务地址</label>
           <input id="api-origin" class="endpoint-input" value="" aria-label="服务地址" placeholder="自动使用当前地址">
+          <label class="endpoint-label" for="api-token">API Token</label>
+          <input id="api-token" class="endpoint-input token-input" type="password" autocomplete="off" aria-label="API Token" placeholder="可选">
           <button class="icon-button" id="refresh-button" title="刷新数据" aria-label="刷新数据">↻</button>
           <div class="connection-pill" id="connection-pill"><span class="status-dot"></span><span>正在连接</span></div>
         </div>
@@ -103,7 +105,7 @@
               <div class="panel-heading"><div><span class="section-label">RESULT</span><h2>转写结果</h2></div><button class="icon-button" id="copy-result" title="复制文本" aria-label="复制文本">▣</button></div>
               <div class="result-summary hidden" id="result-summary"><span class="summary-pill" id="result-status">完成</span><span id="result-duration">—</span><span id="result-model">—</span></div>
               <div class="result-list" id="file-results"><div class="empty-state"><span class="empty-wave">▤</span><strong>转写完成后，结果会显示在这里</strong><p>段落包含时间范围、识别文字和可用的说话人标记。</p></div></div>
-              <div class="result-footer hidden" id="result-footer"><span id="result-speaker-status">说话人识别状态</span><button class="text-button" id="download-result">导出 JSON <b>↓</b></button></div>
+              <div class="result-footer hidden" id="result-footer"><span id="result-speaker-status">说话人识别状态</span><div class="export-actions"><button class="text-button" data-export-format="json">JSON ↓</button><button class="text-button" data-export-format="txt">TXT ↓</button><button class="text-button" data-export-format="srt">SRT ↓</button></div></div>
             </article>
           </div>
           <div class="info-strip"><span class="strip-icon">i</span><div><strong>模型未配置时不会生成模拟结果</strong><span>如果任务失败，请检查服务启动环境中的 ASR_OFFLINE_MODEL_DIR 和模型文件。</span></div></div>

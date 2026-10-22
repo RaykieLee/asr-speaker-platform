@@ -1,4 +1,5 @@
-import { formatTime, resampleTo16k, toS16LE } from './logic.mjs';
+import { authorizationHeaders, formatTime, hotwordEntriesToText, hotwordId,
+  mergeHotwordEntries, normalizeJobForDisplay, resampleTo16k, streamStartMessage, toS16LE } from './logic.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = { hotwords: [], speakers: [], selectedSpeaker: null, selectedHotword: null,
@@ -13,12 +14,14 @@ const views = {
 function apiBase() { return $('api-origin').value.trim().replace(/\/$/, '') || location.origin; }
 function apiUrl(path) { return `${apiBase()}${path}`; }
 async function request(path, options = {}) {
-  const response = await fetch(apiUrl(path), options);
+  const response = await fetch(apiUrl(path), { ...options, headers: authorizationHeaders($('api-token')?.value || '', options.headers) });
   const type = response.headers.get('content-type') || '';
   const body = type.includes('json') ? await response.json() : await response.text();
   if (!response.ok) {
     const detail = body?.detail;
-    throw new Error(typeof detail === 'string' ? detail : detail?.message || body?.message || `${response.status} ${response.statusText}`);
+    const error = new Error(typeof detail === 'string' ? detail : detail?.message || body?.message || `${response.status} ${response.statusText}`);
+    error.quality = detail?.quality;
+    throw error;
   }
   return body;
 }
@@ -51,7 +54,7 @@ async function checkHealth() {
 }
 function selectOptions(select, selected = '') {
   const keep = select.value || selected;
-  select.innerHTML = '<option value="">不使用热词</option>' + state.hotwords.filter(x => x.status === 'active').map(x => `<option value="${escapeHtml(x.set_id)}">${escapeHtml(x.name)} · v${x.current_version || x.version || 1}</option>`).join('');
+  select.innerHTML = '<option value="">不使用热词</option>' + state.hotwords.filter(x => x.status === 'active').map(x => `<option value="${escapeHtml(hotwordId(x))}">${escapeHtml(x.name)} · v${x.current_version || x.version || 1}</option>`).join('');
   select.value = keep;
 }
 async function loadHotwords() {
@@ -59,18 +62,18 @@ async function loadHotwords() {
     const result = await request('/api/v1/hotword-sets?status=active');
     state.hotwords = Array.isArray(result) ? result : result.items || [];
     $('hotword-count').textContent = state.hotwords.length;
-    $('hotword-list').innerHTML = state.hotwords.length ? state.hotwords.map(item => `<button class="library-row ${state.selectedHotword?.set_id === item.set_id ? 'chosen' : ''}" data-hotword="${escapeHtml(item.set_id)}"><span class="library-glyph">✳</span><span><strong>${escapeHtml(item.name)}</strong><small>${(item.entries || []).length} 个词条 · v${item.current_version || item.version || 1}</small></span><b>→</b></button>`).join('') : '<div class="empty-state compact"><strong>还没有热词方案</strong><p>创建后可在实时和文件识别中选用。</p></div>';
-    state.hotwords.forEach(item => $('hotword-list').querySelector(`[data-hotword="${CSS.escape(item.set_id)}"]`)?.addEventListener('click', () => editHotword(item)));
+    $('hotword-list').innerHTML = state.hotwords.length ? state.hotwords.map(item => { const id=hotwordId(item); return `<button class="library-row ${hotwordId(state.selectedHotword) === id ? 'chosen' : ''}" data-hotword="${escapeHtml(id)}"><span class="library-glyph">✳</span><span><strong>${escapeHtml(item.name)}</strong><small>${(item.entries || []).length} 个词条 · v${item.current_version || item.version || 1}</small></span><b>→</b></button>`; }).join('') : '<div class="empty-state compact"><strong>还没有热词方案</strong><p>创建后可在实时和文件识别中选用。</p></div>';
+    state.hotwords.forEach(item => $('hotword-list').querySelector(`[data-hotword="${CSS.escape(hotwordId(item))}"]`)?.addEventListener('click', () => editHotword(item)));
     selectOptions($('live-hotword')); selectOptions($('file-hotword'));
   } catch (error) { toast(`读取热词失败：${error.message}`, 'error'); }
 }
 function editHotword(item) {
   state.selectedHotword = item; $('hotword-editor-empty').classList.add('hidden'); $('hotword-editor-form').classList.remove('hidden');
-  $('hotword-name').value = item.name; $('hotword-entries').value = (item.entries || []).join('\n');
+  $('hotword-name').value = item.name; $('hotword-entries').value = hotwordEntriesToText(item.entries || []);
   $('hotword-weight').value = item.weight ?? 1; $('weight-value').textContent = $('hotword-weight').value;
   $('hotword-version').textContent = `版本 ${item.current_version || item.version || 1}`; $('hotword-editor-title').textContent = item.name;
   $('save-hotword').textContent = '保存新版本'; $('deactivate-hotword').classList.remove('hidden');
-  document.querySelectorAll('[data-hotword]').forEach(n => n.classList.toggle('chosen', n.dataset.hotword === item.set_id));
+  document.querySelectorAll('[data-hotword]').forEach(n => n.classList.toggle('chosen', n.dataset.hotword === hotwordId(item)));
 }
 function newHotword() {
   state.selectedHotword = null; $('hotword-editor-empty').classList.add('hidden'); $('hotword-editor-form').classList.remove('hidden');
@@ -80,17 +83,22 @@ function newHotword() {
 }
 async function saveHotword() {
   clearError($('hotword-error'));
-  const entries = $('hotword-entries').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const entries = mergeHotwordEntries($('hotword-entries').value, state.selectedHotword?.entries || []);
   const payload = { name: $('hotword-name').value.trim(), entries, weight: Number($('hotword-weight').value) };
   try {
-    if (state.selectedHotword) await request(`/api/v1/hotword-sets/${encodeURIComponent(state.selectedHotword.set_id)}`, { method: 'PUT', headers: {'content-type':'application/json'}, body: JSON.stringify({...payload, expected_version: state.selectedHotword.current_version || state.selectedHotword.version}) });
-    else await request('/api/v1/hotword-sets', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(payload) });
+    const editing = state.selectedHotword;
+    const saved = editing
+      ? await request(`/api/v1/hotword-sets/${encodeURIComponent(hotwordId(editing))}`, { method: 'PUT', headers: {'content-type':'application/json'}, body: JSON.stringify({...payload, expected_version: editing.current_version || editing.version}) })
+      : await request('/api/v1/hotword-sets', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(payload) });
     toast('热词方案已保存'); await loadHotwords();
+    const id = hotwordId(saved) || hotwordId(editing);
+    const updated = state.hotwords.find(x=>hotwordId(x)===id) || state.hotwords.find(x=>x.name===payload.name);
+    if(updated) editHotword(updated);
   } catch (error) { showError($('hotword-error'), error); }
 }
 async function deactivateHotword() {
   if (!state.selectedHotword) return;
-  try { await request(`/api/v1/hotword-sets/${encodeURIComponent(state.selectedHotword.set_id)}`, {method:'DELETE'}); state.selectedHotword = null; toast('方案已停用'); await loadHotwords(); $('hotword-editor-form').classList.add('hidden'); $('hotword-editor-empty').classList.remove('hidden'); }
+  try { await request(`/api/v1/hotword-sets/${encodeURIComponent(hotwordId(state.selectedHotword))}`, {method:'DELETE'}); state.selectedHotword = null; toast('方案已停用'); await loadHotwords(); $('hotword-editor-form').classList.add('hidden'); $('hotword-editor-empty').classList.remove('hidden'); }
   catch (error) { showError($('hotword-error'), error); }
 }
 
@@ -116,10 +124,23 @@ async function uploadSpeakerSample() {
   if (!state.selectedSpeaker || !$('speaker-audio').files[0]) return;
   clearError($('speaker-error')); const data = new FormData(); data.append('file', $('speaker-audio').files[0]);
   try {
-    const result = await request(`/api/v1/speakers/${encodeURIComponent(state.selectedSpeaker.speaker_id)}/samples`, {method:'POST', body:data});
-    $('quality-card').innerHTML = `<strong>样本检查完成</strong><span>${escapeHtml(result.quality?.status || result.status || '已处理')}</span><small>${escapeHtml(result.quality?.message || result.message || '服务已返回处理结果。')}</small>`;
-    $('quality-card').classList.remove('hidden'); toast('样本已处理'); await loadSpeakers();
-  } catch(error) { showError($('speaker-error'), error); }
+    const speakerId = state.selectedSpeaker.speaker_id;
+    const result = await request(`/api/v1/speakers/${encodeURIComponent(speakerId)}/samples`, {method:'POST', body:data});
+    renderQuality(result.quality || {}, '样本检查完成');
+    toast('样本已处理');
+    const refreshed = await request(`/api/v1/speakers/${encodeURIComponent(speakerId)}`);
+    await loadSpeakers(); selectSpeaker({...refreshed,speaker_id:speakerId});
+  } catch(error) { if (error.quality) renderQuality(error.quality, '样本未通过检查'); showError($('speaker-error'), error); }
+}
+
+function renderQuality(quality, heading) {
+  const rows = [
+    ['时长', quality.duration_seconds, ' 秒'], ['有效语音', quality.speech_seconds, ' 秒'],
+    ['语音占比', quality.speech_ratio, '%', true], ['整体音量 RMS', quality.rms, ''],
+    ['削波占比', quality.clipped_ratio, '%', true],
+  ].filter(([,value]) => Number.isFinite(value));
+  $('quality-card').innerHTML = `<strong>${escapeHtml(heading)}</strong><span>${quality.is_silent ? '检测到静音' : quality.clipped_ratio > 0.01 ? '存在明显削波' : '已完成检查'}</span><div class="quality-metrics">${rows.map(([label,value,unit,ratio])=>`<small>${label}：${ratio ? (value*100).toFixed(1) : Number(value).toFixed(2)}${unit}</small>`).join('')}</div>`;
+  $('quality-card').classList.remove('hidden');
 }
 
 function renderLive() {
@@ -144,7 +165,7 @@ async function startLive() {
     const stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1, echoCancellation:true, noiseSuppression:true}});
     const context = new AudioContext(); await context.resume();
     const wsUrl = apiUrl('/api/v1/stream').replace(/^http/, 'ws'); const socket = new WebSocket(wsUrl); socket.binaryType = 'arraybuffer';
-    socket.addEventListener('open', () => socket.send(JSON.stringify({type:'start', protocol_version:1, sample_rate:16000, format:'s16le', channels:1, hotword_set_id:$('live-hotword').value || null})));
+    socket.addEventListener('open', () => socket.send(JSON.stringify(streamStartMessage({hotwordSetId:$('live-hotword').value, apiKey:$('api-token').value}))));
     socket.addEventListener('message', handleLiveMessage); socket.addEventListener('error', () => toast('实时连接失败，请确认服务已启动。', 'error'));
     const source = context.createMediaStreamSource(stream); const processor = context.createScriptProcessor(2048, 1, 1);
     processor.onaudioprocess = e => { if(socket.readyState !== WebSocket.OPEN) return; const pcm = resampleTo16k(e.inputBuffer.getChannelData(0), context.sampleRate); if(pcm.length) socket.send(toS16LE(pcm)); };
@@ -166,13 +187,15 @@ function renderJob(job) {
   state.jobData = job; $('job-state').textContent = job.status; $('job-percent').textContent = `${Math.round((job.progress || 0)*100)}%`;
   $('job-progress-bar').style.width = `${Math.max(4, (job.progress || 0)*100)}%`;
   $('result-summary').classList.remove('hidden'); $('result-footer').classList.remove('hidden');
-  $('result-status').textContent = job.status; $('result-duration').textContent = job.result_metadata?.duration_seconds ? formatTime(job.result_metadata.duration_seconds) : '—';
+  const display = normalizeJobForDisplay(job);
+  $('result-status').textContent = job.status; $('result-duration').textContent = display.duration != null ? formatTime(display.duration) : '—';
   $('result-model').textContent = job.model_version || job.result_metadata?.model_version || '模型版本未知';
-  const segments = job.result_metadata?.segments || job.segments || [];
-  if (segments.length) $('file-results').innerHTML = segments.map((s,i) => `<div class="result-segment"><div class="result-time">${formatTime(s.start ?? s.start_seconds)} – ${formatTime(s.end ?? s.end_seconds)} <span>${escapeHtml(s.speaker_name || s.registered_speaker_id || s.local_speaker_id || '说话人未标注')}</span></div><p>${escapeHtml(s.text || '')}</p></div>`).join('');
-  else if (job.result_metadata?.text) $('file-results').innerHTML = `<div class="result-segment"><p>${escapeHtml(job.result_metadata.text)}</p></div>`;
+  const segments = display.segments;
+  if (segments.length) $('file-results').innerHTML = segments.map(s => `<div class="result-segment"><div class="result-time">${formatTime(s.start)} – ${formatTime(s.end)} <span>${escapeHtml(s.speaker_name || '说话人未标注')}</span></div><p>${escapeHtml(s.text || '')}</p></div>`).join('');
+  else if (display.text) $('file-results').innerHTML = `<div class="result-segment"><p>${escapeHtml(display.text)}</p></div>`;
   if (job.status === 'failed') { $('upload-error').textContent = job.error_message || '任务失败'; $('upload-error').classList.remove('hidden'); }
-  $('result-speaker-status').textContent = `说话人处理：${job.result_metadata?.speaker_diarization || '服务未提供状态'}`;
+  else clearError($('upload-error'));
+  $('result-speaker-status').textContent = `说话人处理：${display.speakerDiarization}`;
 }
 async function submitFile() {
   const file = $('audio-file').files[0]; if (!file) return;
@@ -190,18 +213,31 @@ function bind() {
   $('refresh-button').addEventListener('click', async()=>{await checkHealth(); await loadHotwords();});
   $('api-origin').value = localStorage.getItem('asr-api-origin') || '';
   $('api-origin').addEventListener('change',()=>{localStorage.setItem('asr-api-origin',$('api-origin').value.trim()); checkHealth();});
+  $('api-token').value = sessionStorage.getItem('asr-api-token') || '';
+  $('api-token').addEventListener('change',()=>sessionStorage.setItem('asr-api-token',$('api-token').value.trim()));
   $('dismiss-notice').addEventListener('click',()=>$('service-notice').classList.add('hidden'));
   $('start-live').addEventListener('click',startLive); $('stop-live').addEventListener('click',()=>stopCapture(true));
   $('clear-live').addEventListener('click',()=>{state.liveSegments.clear();renderLive();});
   $('audio-file').addEventListener('change',e=>{const f=e.target.files[0]; $('file-prompt').textContent=f?.name || '拖入音频文件，或 浏览文件'; $('file-details').textContent=f ? `${(f.size/1024/1024).toFixed(1)} MB · ${f.type || '音频文件'}` : '支持常见音频格式，最大 512 MB'; $('upload-file').disabled=!f;});
   $('dropzone').addEventListener('dragover',e=>{e.preventDefault();$('dropzone').classList.add('dragging');}); $('dropzone').addEventListener('dragleave',()=> $('dropzone').classList.remove('dragging'));
   $('dropzone').addEventListener('drop',e=>{e.preventDefault();$('dropzone').classList.remove('dragging');if(e.dataTransfer.files[0]){$('audio-file').files=e.dataTransfer.files;$('audio-file').dispatchEvent(new Event('change'));}});
-  $('upload-file').addEventListener('click',submitFile); $('copy-result').addEventListener('click',()=>navigator.clipboard?.writeText((state.jobData?.result_metadata?.segments||[]).map(s=>s.text).join('\n')).then(()=>toast('已复制转写文本')));
-  $('download-result').addEventListener('click',()=>{const blob=new Blob([JSON.stringify(state.jobData,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`transcription-${state.job?.job_id || 'result'}.json`;a.click();URL.revokeObjectURL(a.href);});
+  $('upload-file').addEventListener('click',submitFile); $('copy-result').addEventListener('click',()=>navigator.clipboard?.writeText(normalizeJobForDisplay(state.jobData || {}).segments.map(s=>s.text).join('\n') || normalizeJobForDisplay(state.jobData || {}).text).then(()=>toast('已复制转写文本')));
+  document.querySelectorAll('[data-export-format]').forEach(button=>button.addEventListener('click',()=>downloadExport(button.dataset.exportFormat)));
   $('new-speaker-button').addEventListener('click',createSpeaker); $('refresh-speakers').addEventListener('click',loadSpeakers);
   $('speaker-audio').addEventListener('change',e=>{$('speaker-file-name').textContent=e.target.files[0]?.name||'选择语音样本';$('upload-speaker-sample').disabled=!e.target.files[0];});
   $('upload-speaker-sample').addEventListener('click',uploadSpeakerSample);
   $('new-hotword-button').addEventListener('click',newHotword); $('refresh-hotwords').addEventListener('click',loadHotwords); $('save-hotword').addEventListener('click',saveHotword); $('deactivate-hotword').addEventListener('click',deactivateHotword);
   $('hotword-weight').addEventListener('input',()=> $('weight-value').textContent=$('hotword-weight').value);
+}
+
+async function downloadExport(format) {
+  if (!state.job?.job_id) return;
+  try {
+    const response = await fetch(apiUrl(`/api/v1/transcriptions/${encodeURIComponent(state.job.job_id)}/export?format=${encodeURIComponent(format)}`), {headers: authorizationHeaders($('api-token').value)});
+    if (!response.ok) { const data=await response.json().catch(()=>({})); throw new Error(data.message || data.detail?.message || `导出失败 (${response.status})`); }
+    const blob = await response.blob(); const anchor=document.createElement('a');
+    anchor.href=URL.createObjectURL(blob); anchor.download=`transcription-${state.job.job_id}.${format}`;
+    anchor.click(); setTimeout(()=>URL.revokeObjectURL(anchor.href),1000);
+  } catch(error) { toast(error.message,'error'); }
 }
 bind(); checkHealth(); loadHotwords();
