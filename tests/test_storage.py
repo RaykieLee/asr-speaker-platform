@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from backend.app.storage import FileStore, SQLiteStore, UnsafeStoragePath
+from backend.app.storage import FileStore, SQLiteStore, StorageService, UnsafeStoragePath
 
 
 def test_migration_is_idempotent_and_persisted_rows_survive_reopen(tmp_path):
@@ -85,6 +85,54 @@ def test_hotword_snapshots_use_optimistic_version_check(tmp_path):
     assert store.get_hotword_version(current["set_id"], 1)["entries"] == ["first"]
     with pytest.raises(ValueError, match="stale"):
         store.append_hotword_version(current["set_id"], ["lost update"], expected_version=1)
+    job = store.create_job(hotword_set_id=current["set_id"], hotword_version=2)
+    assert store.delete_hotword_set(current["set_id"])
+    assert store.get_hotword_set(current["set_id"])["status"] == "inactive"
+    assert store.get_hotword_version(current["set_id"], 1)["entries"] == ["first"]
+    assert store.get_hotword_version(current["set_id"], 2)["entries"] == ["second"]
+    assert store.get_job(job["id"])["hotword_set_id"] == current["set_id"]
+    store.close()
+
+
+def test_storage_service_removes_sample_audio_and_preserves_shared_files(tmp_path):
+    store = SQLiteStore(tmp_path / "db.sqlite3")
+    store.initialize()
+    files = FileStore(tmp_path / "objects")
+    service = StorageService(store, files)
+    first = store.create_speaker("first")
+    second = store.create_speaker("second")
+    files.write("samples/shared.wav", b"shared")
+    files.write("samples/only.wav", b"only")
+    shared_one = store.create_sample(first["id"], "samples/shared.wav")
+    only = store.create_sample(first["id"], "samples/only.wav")
+    store.create_sample(second["id"], "samples/shared.wav")
+
+    assert service.delete_sample(shared_one["id"])
+    assert files.exists("samples/shared.wav")
+    assert service.delete_sample(only["id"])
+    assert not files.exists("samples/only.wav")
+    store.close()
+
+
+def test_storage_service_deleting_speaker_cleans_all_sample_files(tmp_path):
+    store = SQLiteStore(tmp_path / "db.sqlite3")
+    store.initialize()
+    files = FileStore(tmp_path / "objects")
+    service = StorageService(store, files)
+    person = store.create_speaker("registered")
+    files.write("samples/a.wav", b"a")
+    files.write("samples/b.wav", b"b")
+    store.create_sample(person["id"], "samples/a.wav")
+    store.create_sample(person["id"], "samples/b.wav")
+    job = store.create_job(file_path="jobs/upload.wav")
+    files.write("jobs/upload.wav", b"job audio")
+
+    assert service.delete_speaker(person["id"])
+    assert not files.exists("samples/a.wav")
+    assert not files.exists("samples/b.wav")
+    # Uploaded transcription audio has a different owner and is retained.
+    assert files.exists("jobs/upload.wav")
+    assert store.get_job(job["id"]) is not None
     store.close()
 
 

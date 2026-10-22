@@ -441,6 +441,11 @@ class SQLiteStore:
             return cur.rowcount > 0
 
     def delete_hotword_set(self, hotword_set_id: str) -> bool:
+        """Deactivate a set; immutable version snapshots remain queryable."""
+        return self.set_hotword_set_status(hotword_set_id, "inactive")
+
+    def purge_hotword_set(self, hotword_set_id: str) -> bool:
+        """Permanently remove a set and versions for explicit retention cleanup."""
         with self.transaction() as db:
             cur = db.execute("DELETE FROM hotword_sets WHERE id=?", (hotword_set_id,))
             return cur.rowcount > 0

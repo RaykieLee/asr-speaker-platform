@@ -10,15 +10,16 @@ returned as lists of float32 values. The API intentionally leaves ASR-specific
 validation and profile re-aggregation to higher layers.
 
 ``FileStore`` accepts only relative paths under a configured root. Writes use a
-temporary sibling and atomic rename. Database cascades remove dependent rows:
-deleting a speaker also deletes samples and its profile, while task segments
-retain their history with registered speaker IDs set to NULL. File deletion is
-available explicitly through ``FileStore.delete``; call it with paths returned
-by the relevant query before/after deleting their owning rows according to the
-application's retention policy.
+temporary sibling and atomic rename. ``StorageService`` applies the application
+deletion policy: deleting samples or speakers cascades database relations and
+removes unreferenced sample audio paths. Task segments retain their history with
+registered speaker IDs set to NULL. Deleting a hotword set deactivates it and
+retains immutable versions; ``purge_hotword_set`` is reserved for explicit
+retention cleanup.
 """
 
 from .database import SQLiteStore
 from .files import FileStore, UnsafeStoragePath
+from .service import FileCleanupError, StorageService
 
-__all__ = ["SQLiteStore", "FileStore", "UnsafeStoragePath"]
+__all__ = ["SQLiteStore", "FileStore", "UnsafeStoragePath", "StorageService", "FileCleanupError"]
