@@ -156,11 +156,13 @@ async def lifespan(application: FastAPI):
             diarizer = SherpaOfflineDiarizer.load(
                 diarization_path, model_path,
                 num_threads=int(os.environ.get("ASR_DIARIZATION_THREADS", "2")),
+                num_speakers=int(os.environ.get("ASR_DIARIZATION_NUM_SPEAKERS", "-1")),
             ) if diarization_path and model_path else None
             speaker_matcher = SpeakerMatcher(
                 database, extractor,
                 min_similarity=float(os.environ.get("ASR_FILE_SPEAKER_MIN_SIMILARITY", "0.55")),
                 min_margin=float(os.environ.get("ASR_FILE_SPEAKER_MIN_MARGIN", "0.05")),
+                min_segment_seconds=float(os.environ.get("ASR_FILE_SPEAKER_MIN_SEGMENT_SECONDS", "1.0")),
             ) if diarizer is not None and extractor is not None else None
             application.state.transcription_service = TranscriptionService(
                 database, files, FileASRService(recognizer, diarizer=diarizer,
