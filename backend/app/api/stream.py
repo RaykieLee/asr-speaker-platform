@@ -50,7 +50,7 @@ async def stream_asr(websocket: WebSocket) -> None:
         except json.JSONDecodeError as exc:
             raise LiveProtocolError("start 消息不是有效 JSON") from exc
         options = parse_start_message(start_data)
-        session = service.create_session(options)
+        session = await service.create_session(options)
     except EngineConfigError as exc:
         await _error(websocket, "model_unavailable", str(exc), request_id)
         await websocket.close(code=1013)
@@ -59,11 +59,15 @@ async def stream_asr(websocket: WebSocket) -> None:
         await _error(websocket, "protocol_error", str(exc), request_id)
         await websocket.close(code=1003)
         return
+    except Exception as exc:
+        await _error(websocket, "recognition_error", str(exc), request_id)
+        await websocket.close(code=1011)
+        return
 
     await websocket.send_json({
         "type": "started", "protocol_version": 1, "session_id": session.session_id,
-        "hotword_set_id": options.hotword_set_id,
-        "hotword_set_version": options.hotword_set_version,
+        "hotword_set_id": session.options.hotword_set_id,
+        "hotword_set_version": session.options.hotword_set_version,
     })
     audio_queue: asyncio.Queue[bytes | None] = service.create_queue()
     send_lock = asyncio.Lock()

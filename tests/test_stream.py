@@ -53,10 +53,12 @@ class FakeRecognizer:
         return False
 
 
-def client_for(recognizer, *, queue_size=8):
+def client_for(recognizer, *, queue_size=8, hotword_resolver=None):
     app = FastAPI()
     app.include_router(router)
-    app.state.live_asr_service = LiveASRService(recognizer, queue_size=queue_size)
+    app.state.live_asr_service = LiveASRService(
+        recognizer, queue_size=queue_size, hotword_resolver=hotword_resolver
+    )
     return TestClient(app)
 
 
@@ -161,3 +163,50 @@ def test_queue_overflow_reports_busy_and_disconnect_is_clean():
         ws.receive_json()
         ws.send_bytes(b"\x01\x00" * 100)
         ws.receive_json()
+
+
+def test_async_hotword_resolver_is_awaited_and_pinned():
+    async def resolve(set_id):
+        assert set_id == "set_1"
+        return ["项 目"], 3
+
+    recognizer = FakeRecognizer()
+    with client_for(recognizer, hotword_resolver=resolve).websocket_connect(
+        "/api/v1/stream"
+    ) as ws:
+        ws.send_json(start_message(hotword_set_id="set_1"))
+        started = ws.receive_json()
+        assert started["type"] == "started"
+        assert started["hotword_set_version"] == 3
+        assert recognizer.streams[0].hotwords == ["项 目"]
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["type"] == "completed"
+
+
+def test_hotword_resolver_failure_is_structured_error():
+    async def resolve(_set_id):
+        raise LookupError("热词集不存在")
+
+    with client_for(FakeRecognizer(), hotword_resolver=resolve).websocket_connect(
+        "/api/v1/stream"
+    ) as ws:
+        ws.send_json(start_message(hotword_set_id="missing"))
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "model_unavailable"
+        assert "热词集不存在" in error["message"]
+
+
+def test_inference_failure_is_structured_error():
+    class FailingRecognizer(FakeRecognizer):
+        def decode_stream(self, stream):
+            raise RuntimeError("推理失败")
+
+    with client_for(FailingRecognizer()).websocket_connect("/api/v1/stream") as ws:
+        ws.send_json(start_message())
+        ws.receive_json()
+        ws.send_bytes(b"\x01\x00" * 100)
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "recognition_error"
+        assert "推理失败" in error["message"]

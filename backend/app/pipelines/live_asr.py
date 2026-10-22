@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import array
+import inspect
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -122,14 +123,21 @@ class LiveASRService:
         self.queue_size = queue_size
         self.hotword_resolver = hotword_resolver
 
-    def create_session(self, options: StartOptions | None = None) -> LiveASRSession:
+    async def create_session(self, options: StartOptions | None = None) -> LiveASRSession:
         if options and options.hotword_set_id and not self.hotword_resolver:
             raise EngineConfigError("热词集解析器未配置，不能忽略 hotword_set_id")
         if options and options.hotword_set_id and self.hotword_resolver:
-            resolved = self.hotword_resolver(options.hotword_set_id)
-            if hasattr(resolved, "__await__"):
-                raise TypeError("异步 hotword_resolver 请在 API 层解析")
-            words, version = resolved
+            try:
+                resolved = self.hotword_resolver(options.hotword_set_id)
+                if inspect.isawaitable(resolved):
+                    resolved = await resolved
+                words, version = resolved
+                if not isinstance(words, (tuple, list)) or any(
+                    not isinstance(word, str) or not word.strip() for word in words
+                ):
+                    raise ValueError("热词集内容无效")
+            except Exception as exc:
+                raise EngineConfigError(f"热词集解析失败: {exc}") from exc
             options = StartOptions(sample_rate=options.sample_rate, format=options.format,
                                    hotwords=tuple(word.strip() for word in words), hotword_set_id=options.hotword_set_id,
                                    hotword_set_version=version)
