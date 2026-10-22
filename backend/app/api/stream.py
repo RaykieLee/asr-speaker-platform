@@ -8,9 +8,9 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.audio.core import PCMFormatError
-from app.engines.base import EngineConfigError
-from app.pipelines.live_asr import LiveASRService, LiveProtocolError, parse_start_message
+from backend.app.audio.core import PCMFormatError
+from backend.app.engines.base import EngineConfigError
+from backend.app.pipelines.live_asr import LiveASRService, LiveProtocolError, parse_start_message
 
 router = APIRouter()
 

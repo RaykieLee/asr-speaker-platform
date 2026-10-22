@@ -8,8 +8,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from app.audio.core import pcm_s16le_to_float32
-from app.engines.base import EngineConfigError
+from backend.app.audio.core import pcm_s16le_to_float32
+from backend.app.engines.base import EngineConfigError
 
 
 class LiveProtocolError(ValueError):

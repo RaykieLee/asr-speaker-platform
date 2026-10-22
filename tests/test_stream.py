@@ -3,8 +3,9 @@ import threading
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.stream import router
-from app.pipelines.live_asr import LiveASRService
+from backend.app.api.stream import router
+from backend.app.pipelines.live_asr import LiveASRService
+from backend.app.main import app as production_app
 
 
 class FakeStream:
@@ -93,6 +94,12 @@ def test_missing_model_service_does_not_return_fake_transcript():
         assert error["type"] == "error"
         assert error["code"] == "model_unavailable"
         assert "模型" in error["message"]
+
+
+def test_production_app_registers_stream_route():
+    with TestClient(production_app).websocket_connect("/api/v1/stream") as ws:
+        error = ws.receive_json()
+        assert error["code"] == "model_unavailable"
 
 
 def test_stop_flushes_trailing_audio_and_emits_design_fields():
