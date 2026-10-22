@@ -96,8 +96,8 @@ class TranscriptionService:
             raise ValueError("上传文件不能为空")
         if len(content) > self.max_upload_bytes:
             raise UploadTooLarge(f"上传文件超过 {self.max_upload_bytes} 字节限制")
-        if channel_mode != "mixdown":
-            raise ValueError("当前只支持 channel_mode=mixdown")
+        if channel_mode not in {"mixdown", "separate"}:
+            raise ValueError("channel_mode 必须是 mixdown 或 separate")
         if not language or len(language) > 32:
             raise ValueError("language 必须是 1 到 32 个字符")
 

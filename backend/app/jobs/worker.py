@@ -105,7 +105,8 @@ class JobWorker:
                 self.database.update_job(job_id, progress=max(0.0, min(0.99, progress)))
 
             result = self.asr.transcribe_file(
-                source_path, hotwords=options.get("hotwords") or None, progress=update_progress,
+                source_path, hotwords=options.get("hotwords") or None,
+                channel_mode=options.get("channel_mode", "mixdown"), progress=update_progress,
             )
             for segment in result.segments:
                 self.database.upsert_segment(
