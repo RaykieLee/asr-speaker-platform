@@ -121,7 +121,8 @@ class JobWorker:
                 "hotword_set_id": job.get("hotword_set_id"),
                 "hotword_set_version": job.get("hotword_version"),
                 "channel_mode": options.get("channel_mode", "mixdown"),
-                "speaker_diarization": "pending_t09",
+                "speaker_diarization": result.speaker_diarization,
+                "speaker_mappings": list(result.speaker_mappings),
             }
             self.database.update_job(job_id, status="succeeded", progress=1,
                                      finished_at=_now(), result_metadata=metadata)

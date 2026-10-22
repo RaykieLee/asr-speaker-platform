@@ -238,7 +238,7 @@ def test_upload_persists_hotword_snapshot_and_query_returns_segments(tmp_path):
             assert len(result["segments"]) == 1
             assert result["segments"][0]["start_seconds"] == 0
             assert result["segments"][0]["end_seconds"] == pytest.approx(0.25)
-            assert result["result_metadata"]["speaker_diarization"] == "pending_t09"
+            assert result["result_metadata"]["speaker_diarization"] == "disabled"
     finally:
         service.close()
         database.close()

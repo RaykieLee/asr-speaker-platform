@@ -1,6 +1,7 @@
 """Offline ASR over normalized audio with bounded chunks and source timestamps."""
 from __future__ import annotations
 
+import array
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -22,6 +23,10 @@ class DiarizationProvider(Protocol):
     def segment(self, audio: AudioBuffer) -> list[dict[str, Any]]: ...
 
 
+class SpeakerMatcherProvider(Protocol):
+    def match(self, audio: AudioBuffer, segments: list[dict[str, Any]]) -> dict[str, dict[str, Any]]: ...
+
+
 @dataclass(frozen=True)
 class ASRSegment:
     segment_id: int
@@ -40,6 +45,8 @@ class FileASRResult:
     duration: float
     segments: tuple[ASRSegment, ...]
     model_version: str | None
+    speaker_diarization: str = "disabled"
+    speaker_mappings: tuple[dict[str, Any], ...] = ()
 
     @property
     def text(self) -> str:
@@ -94,7 +101,8 @@ class FileASRService:
 
     def __init__(self, recognizer: OfflineRecognizer | None, *,
                  max_chunk_seconds: float = 60.0, overlap_seconds: float = 0.8,
-                 diarizer: DiarizationProvider | None = None):
+                 diarizer: DiarizationProvider | None = None,
+                 speaker_matcher: SpeakerMatcherProvider | None = None):
         if max_chunk_seconds <= 0:
             raise ValueError("max_chunk_seconds must be positive")
         if overlap_seconds < 0 or overlap_seconds >= max_chunk_seconds:
@@ -103,6 +111,7 @@ class FileASRService:
         self.max_chunk_seconds = max_chunk_seconds
         self.overlap_seconds = overlap_seconds
         self.diarizer = diarizer
+        self.speaker_matcher = speaker_matcher
 
     @property
     def model_version(self) -> str | None:
@@ -122,10 +131,125 @@ class FileASRService:
         audio = normalize_audio(source)
         if audio.sample_rate != 16_000 or audio.channels != 1:
             raise EngineConfigError("离线 ASR 仅接受标准化的 16000 Hz 单声道音频")
+        if self.diarizer is None:
+            segments = self._transcribe_plain(audio, hotwords=hotwords, progress=progress)
+            return FileASRResult(audio.duration, tuple(segments), self.model_version)
+        if not audio.frame_count:
+            if progress:
+                progress(1.0)
+            return FileASRResult(audio.duration, (), self.model_version, "no_speech", ())
+
+        diarized = self.diarizer.segment(audio)
+        diarized = self._normalize_diarization_ranges(diarized, audio.duration)
+        if not diarized:
+            # Diarization can miss speech even when the recognizer can still
+            # recover it. Preserve the transcript and leave speaker identity
+            # unset instead of treating an empty diarization result as silence.
+            segments = self._transcribe_plain(audio, hotwords=hotwords, progress=progress)
+            return FileASRResult(audio.duration, tuple(segments), self.model_version,
+                                 "no_speech", ())
+
+        mappings = self.speaker_matcher.match(audio, diarized) if self.speaker_matcher else {}
+        local_ids = list(dict.fromkeys(item["local_speaker_id"] for item in diarized))
+        for index, local_id in enumerate(local_ids, start=1):
+            mappings.setdefault(local_id, {
+                "local_speaker_id": local_id,
+                "registered_speaker_id": None,
+                "speaker_name": f"未知说话人 {index}",
+                "similarity": None,
+                "margin": None,
+                "match_status": "disabled" if self.speaker_matcher is None else "unknown",
+                "model_version": None,
+                "clean_sample_count": 0,
+            })
+
+        output: list[ASRSegment] = []
+        total = len(diarized)
+        for range_index, item in enumerate(diarized):
+            start_frame = max(0, min(audio.frame_count, round(item["start"] * audio.sample_rate)))
+            end_frame = max(start_frame, min(audio.frame_count, round(item["end"] * audio.sample_rate)))
+            samples = audio.samples[start_frame:end_frame]
+            crop = AudioBuffer(array.array("f", samples), audio.sample_rate, 1,
+                               audio.source_sample_rate or audio.sample_rate, 1,
+                               item["end"] - item["start"])
+
+            def update_range_progress(value: float) -> None:
+                if progress:
+                    progress((range_index + value) / total)
+
+            local_segments = self._transcribe_plain(
+                crop, hotwords=hotwords, progress=update_range_progress,
+            ) if samples else []
+            if not local_segments:
+                local_segments = [ASRSegment(0, 0.0, crop.duration, "")]
+            mapping = mappings[item["local_speaker_id"]]
+            for segment in local_segments:
+                metadata = dict(segment.metadata or {})
+                metadata.update({
+                    "speaker_name": mapping["speaker_name"],
+                    "speaker_match_status": mapping["match_status"],
+                    "speaker_similarity": mapping.get("similarity"),
+                    "speaker_margin": mapping.get("margin"),
+                    "diarization_start": item["start"],
+                    "diarization_end": item["end"],
+                })
+                start = item["start"] + segment.start
+                end = min(item["end"], item["start"] + segment.end)
+                text = segment.text
+                segment_overlap = any(
+                    other["local_speaker_id"] != item["local_speaker_id"]
+                    and min(end, other["end"]) > max(start, other["start"])
+                    for other in diarized
+                )
+                duplicate = any(
+                    existing.text and text and existing.text.strip() == text.strip()
+                    and min(existing.end, end) > max(existing.start, start)
+                    for existing in output
+                ) if segment_overlap else False
+                if duplicate:
+                    text = ""
+                    metadata["duplicate_overlap_text_suppressed"] = True
+                output.append(ASRSegment(
+                    len(output) + 1, start, max(start, end), text,
+                    local_speaker_id=item["local_speaker_id"],
+                    registered_speaker_id=mapping.get("registered_speaker_id"),
+                    overlap=segment_overlap, metadata=metadata,
+                ))
+
+        if progress:
+            progress(1.0)
+        status = "completed" if self.speaker_matcher else "unmatched"
+        return FileASRResult(audio.duration, tuple(output), self.model_version,
+                             status, tuple(mappings[local_id] for local_id in local_ids))
+
+    @staticmethod
+    def _normalize_diarization_ranges(ranges: list[dict[str, Any]], duration: float) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in ranges:
+            try:
+                start, end = float(item["start"]), float(item["end"])
+                local_id = str(item.get("local_speaker_id", ""))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise EngineConfigError(f"说话人分段器返回无效区间: {item!r}") from exc
+            if not local_id or not 0 <= start < end <= duration + 1e-3:
+                raise EngineConfigError(f"说话人分段器返回越界或空区间: {item!r}")
+            normalized.append({**item, "start": max(0.0, start),
+                               "end": min(duration, end), "local_speaker_id": local_id,
+                               "overlap": bool(item.get("overlap", False))})
+        normalized.sort(key=lambda item: (item["start"], item["end"], item["local_speaker_id"]))
+        for index, current in enumerate(normalized):
+            if any(other["local_speaker_id"] != current["local_speaker_id"]
+                   and min(current["end"], other["end"]) > max(current["start"], other["start"])
+                   for other_index, other in enumerate(normalized) if other_index != index):
+                current["overlap"] = True
+        return normalized
+
+    def _transcribe_plain(self, audio: AudioBuffer, *, hotwords: list[str | list[str]] | None,
+                          progress: Callable[[float], None] | None) -> list[ASRSegment]:
         windows = _chunk_windows(audio.frame_count, audio.sample_rate,
                                  self.max_chunk_seconds, self.overlap_seconds)
         if not windows:
-            return FileASRResult(audio.duration, (), self.model_version)
+            return []
 
         decoded: list[tuple[int, int, str]] = []
         for index, (start, end) in enumerate(windows):
@@ -152,4 +276,4 @@ class FileASRService:
                     text=text, metadata={"chunk_index": index, "chunk_start": start / audio.sample_rate,
                                          "chunk_end": audio.duration if end == audio.frame_count else end / audio.sample_rate},
                 ))
-        return FileASRResult(audio.duration, tuple(segments), self.model_version)
+        return segments
