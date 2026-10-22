@@ -1,37 +1,63 @@
-# ASR 与说话人识别平台
+# ASR and speaker recognition platform
 
-一个面向本地部署的普通话与英语语音识别平台，目标能力包括实时转写、音频文件转写、说话人分段与声纹映射、热词管理，以及可演示的网页界面。详细范围和实施顺序见[详细设计与实施计划](详细设计与实施计划.md)。
+A local FastAPI service for streaming transcription, file transcription, speaker diarization and registration, and hotword sets. The backend requires Python 3.11 and the models listed in [`models/manifest.json`](models/manifest.json). Model binaries and recordings are downloaded or supplied locally; they are excluded from Git and the container image.
 
-当前仓库处于项目初始化阶段，提供 Python 3.11 后端包、FastAPI 健康检查端点和基础测试。识别引擎、数据存储、网页 Demo 与压测能力将在后续任务中实现。模型文件和录音样本不纳入代码仓库。
+## macOS setup
 
-## 环境要求
-
-- Python 3.11
-- pip
-
-## 安装与运行
-
-在仓库根目录执行：
+Install Python 3.11 and FFmpeg (`brew install ffmpeg`) for decoding compressed audio formats. From the repository root, install the application and fetch the tested model files:
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
-uvicorn backend.app.main:app --reload
+python models/download.py online-small
+python models/download.py offline-multi
+python models/download.py 3dspeaker-eres2net-zh-cn
+python models/download.py pyannote-segmentation-3-0
 ```
 
-打开 <http://127.0.0.1:8000/health> 可查看服务健康状态；交互式 API 文档位于 <http://127.0.0.1:8000/docs>。
+Set model paths and start the service on localhost:
 
-## 测试
+```bash
+export ASR_ONLINE_MODEL_DIR=models/online-small
+export ASR_OFFLINE_MODEL_DIR=models/offline-multi
+export ASR_SPEAKER_MODEL_PATH=models/speaker/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+export ASR_SPEAKER_MODEL_VERSION=3dspeaker-eres2net-base-zh-cn-v1
+export ASR_DIARIZATION_MODEL_PATH=models/diarization/model.int8.onnx
+export ASR_DATA_DIR=data
+uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+```
+
+The version value above labels the selected embedding artifact in stored profiles. Keep it unchanged for those profile vectors; if you replace the model, set a new version and re-enroll profiles. The service stores the SQLite database and uploaded audio under `ASR_DATA_DIR`.
+
+Open <http://127.0.0.1:8000/health> for the health check and <http://127.0.0.1:8000/docs> for the API.
+
+## Linux container setup
+
+Install Docker Engine with the Compose plugin. Download the model files on the host as shown above, then build and start the container:
+
+```bash
+python3.11 -m pip install -e .
+python3.11 models/download.py online-small
+python3.11 models/download.py offline-multi
+python3.11 models/download.py 3dspeaker-eres2net-zh-cn
+python3.11 models/download.py pyannote-segmentation-3-0
+docker compose up --build
+```
+
+The compose service mounts model directories read-only and persists state in `./data`. The published port binds to `127.0.0.1:8000` by default. Model weights are not copied into the Docker image. To serve other machines, place the service behind the deployment's authentication and TLS layer and change the host port binding deliberately.
+
+## Model and license notes
+
+See [`models/README.md`](models/README.md) for model provenance, exact SHA-256 pins, download behavior, and license review guidance. The model pins identify the tested files; they do not grant permission to redistribute those files. The Pyannote model's upstream archive includes a `LICENSE` file, which the downloader preserves alongside the model.
+
+## Development
+
+Run the test suite with:
 
 ```bash
 python -m pytest
 ```
 
-运行时和开发依赖已在 `pyproject.toml` 中固定版本。后续任务会逐步补充音频处理、ASR/VAD/声纹模型适配、热词编辑、持久化、网页演示和并发容量测试。
-
-## 设计资料
-
-- [详细设计与实施计划](详细设计与实施计划.md)
-- [实现与独立验证任务清单](TASKS.md)
+The runtime package and development tools are pinned in `pyproject.toml` and `uv.lock`.

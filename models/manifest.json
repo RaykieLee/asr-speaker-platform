@@ -1,95 +1,103 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "runtime": {
     "name": "sherpa-onnx",
-    "version": null,
-    "version_status": "待固定",
-    "reason": "项目依赖版本尚未由 T01 固定；发布前应选择并验证同一版本的 Python 绑定。"
+    "version": "1.13.8",
+    "version_status": "tested",
+    "source": "pyproject.toml"
   },
   "models": [
     {
-      "id": "streaming-zipformer-zh-en",
+      "id": "online-small",
       "purpose": "online_asr",
-      "architecture": "transducer",
-      "description": "流式 Zipformer 中英候选；具体仓库、文件、版本、许可证需在 P0 按业务音频确认。",
-      "source_url": null,
-      "version": null,
-      "version_status": "待 P0 固定",
-      "files": [],
-      "sha256": null,
-      "checksum_status": "待固定",
-      "hotwords": { "online": true, "offline": false },
-      "enabled": false
+      "version": "streaming-zipformer-small-bilingual-zh-en-2023-02-16",
+      "source_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16.tar.bz2",
+      "license_status": "review_upstream_terms",
+      "directory": "online-small",
+      "source": {
+        "type": "archive",
+        "filename": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16.tar.bz2",
+        "sha256": "2b7c63322b32e5e0f2526043a1103366119ca58dd615cd7105a37c01db9553d7"
+      },
+      "artifacts": [
+        {"member": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/encoder-epoch-99-avg-1.int8.onnx", "name": "encoder-epoch-99-avg-1.int8.onnx", "size": 42980793, "sha256": "db6f51551762e40e549166fe041ea3e45464370b595e9ad23f06478ec3794fbb"},
+        {"member": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/decoder-epoch-99-avg-1.int8.onnx", "name": "decoder-epoch-99-avg-1.int8.onnx", "size": 3486740, "sha256": "4b618d383af304cfae281dbf0a53e8bf442c2f0502256cd5694bd6567ebdd834"},
+        {"member": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/joiner-epoch-99-avg-1.int8.onnx", "name": "joiner-epoch-99-avg-1.int8.onnx", "size": 3228485, "sha256": "bdda356d6f9b8c2d7cee9ee0e26075fa537490f7fd06520be408d287073667b9"},
+        {"member": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/tokens.txt", "name": "tokens.txt", "size": 56317, "sha256": "a8e0e4ec53810e433789b54a5c0134a7eaa2ffca595a6334d54c00da858841d3"},
+        {"member": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16/bpe.model", "name": "bpe.model", "size": 244836, "sha256": "bcae393dbc5611be5ffa4c7ae0841558978a5a4f484008cb9dff3a2cc97ebe01"}
+      ],
+      "generated_artifacts": [
+        {"generator": "sentencepiece_vocab_tsv", "source": "bpe.model", "name": "bpe.vocab", "size": 12564, "sha256": "d0b642f3a2eacd5fadefdeff9e0e1358cab729647cbb7fe58cf738e1f7407029"}
+      ],
+      "hotwords": {"online": true, "offline": false},
+      "enabled": true
     },
     {
-      "id": "offline-transducer-zh-en",
+      "id": "offline-multi",
       "purpose": "offline_asr",
-      "architecture": "transducer",
-      "description": "启用热词的离线 Transducer 候选；具体模型和词表须经业务音频验证后固定。",
-      "source_url": null,
-      "version": null,
-      "version_status": "待 P0 固定",
-      "files": [],
-      "sha256": null,
-      "checksum_status": "待固定",
-      "hotwords": { "online": false, "offline": true },
-      "enabled": false
+      "version": "zipformer-multi-zh-hans-2023-9-2",
+      "source_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-multi-zh-hans-2023-9-2.tar.bz2",
+      "license_status": "review_upstream_terms",
+      "directory": "offline-multi",
+      "source": {
+        "type": "archive",
+        "filename": "sherpa-onnx-zipformer-multi-zh-hans-2023-9-2.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-multi-zh-hans-2023-9-2.tar.bz2",
+        "sha256": "c4925a6b0f998800d16f80caf90d2decff7b7a8c156d044c6cffdf141c847d94"
+      },
+      "artifacts": [
+        {"member": "sherpa-onnx-zipformer-multi-zh-hans-2023-9-2/encoder-epoch-20-avg-1.int8.onnx", "name": "encoder-epoch-20-avg-1.int8.onnx", "size": 69037476, "sha256": "6dd1748110f55cb7e9ce00a6abd4b96959fa3f2a25a20d0c52184dd1eb8c9ece"},
+        {"member": "sherpa-onnx-zipformer-multi-zh-hans-2023-9-2/decoder-epoch-20-avg-1.int8.onnx", "name": "decoder-epoch-20-avg-1.int8.onnx", "size": 1308227, "sha256": "a465c0c4fa22bb31efb86a74c2c4a10b6671327770640b80d5683a3ed9bae522"},
+        {"member": "sherpa-onnx-zipformer-multi-zh-hans-2023-9-2/joiner-epoch-20-avg-1.int8.onnx", "name": "joiner-epoch-20-avg-1.int8.onnx", "size": 1033479, "sha256": "fc04f95a7c184390f48a64eab541f7bcab7c856b5df03bf67f227d1c74b49f99"},
+        {"member": "sherpa-onnx-zipformer-multi-zh-hans-2023-9-2/tokens.txt", "name": "tokens.txt", "size": 18610, "sha256": "67352babdf908352d3ce19c4496cb05ca173805616c23b520927117b2c2e2ffa"},
+        {"member": "sherpa-onnx-zipformer-multi-zh-hans-2023-9-2/bpe.model", "name": "bpe.model", "size": 263956, "sha256": "867a7355801cb43939962ad757ba1cb7941b6171b5a6902772483b4e3a623377"}
+      ],
+      "generated_artifacts": [
+        {"generator": "sentencepiece_vocab_tsv", "source": "bpe.model", "name": "bpe.vocab", "size": 43556, "sha256": "7c59f35ff9712d8c3c6937faf041da61900b70f21ca06a11be0121f049b0f8ea"}
+      ],
+      "hotwords": {"online": false, "offline": true},
+      "enabled": true
     },
     {
-      "id": "sensevoice-zh-en",
-      "purpose": "offline_asr_quality_comparison",
-      "architecture": "sense_voice",
-      "description": "可选质量对照模型；sherpa-onnx SenseVoice 无原生热词配置。",
-      "source_url": null,
-      "version": null,
-      "version_status": "候选，待固定",
-      "files": [],
-      "sha256": null,
-      "checksum_status": "待固定",
-      "hotwords": { "online": false, "offline": false },
-      "enabled": false
-    },
-    {
-      "id": "silero-vad",
-      "purpose": "vad",
-      "architecture": "silero_vad",
-      "description": "Silero VAD 候选。",
-      "source_url": null,
-      "version": null,
-      "version_status": "候选，待固定",
-      "files": [],
-      "sha256": null,
-      "checksum_status": "待固定",
-      "hotwords": { "online": false, "offline": false },
-      "enabled": false
-    },
-    {
-      "id": "speaker-embedding-zh-cn",
+      "id": "3dspeaker-eres2net-zh-cn",
       "purpose": "speaker_embedding",
-      "architecture": "speaker_embedding",
-      "description": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx 候选。",
-      "source_url": null,
-      "version": null,
-      "version_status": "候选，待固定",
-      "files": [],
-      "sha256": null,
-      "checksum_status": "待固定",
-      "hotwords": { "online": false, "offline": false },
-      "enabled": false
+      "version": "sha256:1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+      "source_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+      "license_status": "review_upstream_terms",
+      "directory": "speaker",
+      "source": {
+        "type": "file",
+        "filename": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+        "sha256": "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b"
+      },
+      "artifacts": [
+        {"name": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx", "size": 39593761, "sha256": "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b"}
+      ],
+      "hotwords": {"online": false, "offline": false},
+      "enabled": true
     },
     {
-      "id": "speaker-segmentation-pyannote-3-0",
+      "id": "pyannote-segmentation-3-0",
       "purpose": "speaker_diarization",
-      "architecture": "pyannote_segmentation",
-      "description": "sherpa-onnx-pyannote-segmentation-3-0 候选。",
-      "source_url": null,
-      "version": null,
-      "version_status": "候选，待固定",
-      "files": [],
-      "sha256": null,
-      "checksum_status": "待固定",
-      "hotwords": { "online": false, "offline": false },
-      "enabled": false
+      "version": "pyannote-segmentation-3-0",
+      "source_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+      "license_status": "review_upstream_terms",
+      "directory": "diarization",
+      "source": {
+        "type": "archive",
+        "filename": "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+        "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488"
+      },
+      "artifacts": [
+        {"member": "sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx", "name": "model.int8.onnx", "size": 1540506, "sha256": "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d"},
+        {"member": "sherpa-onnx-pyannote-segmentation-3-0/LICENSE", "name": "LICENSE", "size": 1061, "sha256": "14d7016ad68e7394d6e6b78d96cc2ae431c905287b89674cfdf021e79e62b8ba"},
+        {"member": "sherpa-onnx-pyannote-segmentation-3-0/README.md", "name": "README.md", "size": 115, "sha256": "0380ed76a50efcc421dc62f251ed06e8349688466beac3177bee6e00dc336bfc"}
+      ],
+      "hotwords": {"online": false, "offline": false},
+      "enabled": true
     }
   ]
 }

@@ -1,4 +1,7 @@
+import hashlib
+import io
 import json
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -101,8 +104,72 @@ def test_download_verifies_before_renaming(tmp_path: Path, monkeypatch):
     assert not (tmp_path / "test-model" / "model.onnx.part").exists()
 
 
-def test_manifest_explicitly_marks_unpinned_values():
+def test_manifest_pins_the_runtime_and_tested_models():
     manifest = json.loads((Path(__file__).parents[1] / "models/manifest.json").read_text())
-    assert manifest["runtime"]["version_status"] == "待固定"
-    assert all(not model["enabled"] for model in manifest["models"])
-    assert all(model["sha256"] is None for model in manifest["models"])
+    assert manifest["runtime"]["version"] == "1.13.8"
+    assert manifest["runtime"]["version_status"] == "tested"
+    assert {model["id"] for model in manifest["models"]} == {
+        "online-small", "offline-multi", "3dspeaker-eres2net-zh-cn", "pyannote-segmentation-3-0"
+    }
+    assert all(model["enabled"] for model in manifest["models"])
+    for model in manifest["models"]:
+        assert model["source"]["url"].startswith("https://")
+        assert len(model["source"]["sha256"]) == 64
+        assert all(len(item["sha256"]) == 64 for item in model["artifacts"])
+
+
+def test_archive_download_extracts_only_pinned_regular_member(tmp_path: Path):
+    import models.download as downloader
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    payload = b"selected model bytes"
+    archive_path = cache / "bundle.tar.bz2"
+    with tarfile.open(archive_path, "w:bz2") as archive:
+        for name, data in (("bundle/model.onnx", payload), ("bundle/extra.txt", b"not selected")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    archive_hash = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    model_hash = hashlib.sha256(payload).hexdigest()
+    model = {
+        "id": "small-test",
+        "directory": "small-test",
+        "source": {"type": "archive", "filename": archive_path.name,
+                   "url": "https://example.invalid/bundle", "sha256": archive_hash},
+        "artifacts": [{"member": "bundle/model.onnx", "name": "model.onnx",
+                       "size": len(payload), "sha256": model_hash}],
+    }
+
+    result = downloader.download_model(model, tmp_path / "output", cache_dir=cache)
+
+    assert result == [tmp_path / "output/small-test/model.onnx"]
+    assert result[0].read_bytes() == payload
+    assert not (tmp_path / "output/small-test/extra.txt").exists()
+
+
+def test_archive_download_rejects_traversal_and_link_members(tmp_path: Path):
+    import models.download as downloader
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    archive_path = cache / "bundle.tar.bz2"
+    with tarfile.open(archive_path, "w:bz2") as archive:
+        link = tarfile.TarInfo("bundle/model.onnx")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../outside"
+        archive.addfile(link)
+    archive_hash = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    model = {
+        "id": "unsafe-test",
+        "source": {"type": "archive", "filename": archive_path.name,
+                   "url": "https://example.invalid/bundle", "sha256": archive_hash},
+        "artifacts": [{"member": "bundle/model.onnx", "name": "model.onnx",
+                       "sha256": "a" * 64}],
+    }
+    with pytest.raises(DownloadError, match="非普通文件"):
+        downloader.download_model(model, tmp_path / "output", cache_dir=cache)
+    with pytest.raises(DownloadError, match="非法路径"):
+        downloader.download_model({**model, "artifacts": [{"member": "bundle/model.onnx",
+            "name": "../outside", "sha256": "a" * 64}]}, tmp_path / "output", cache_dir=cache)
+    assert not (tmp_path / "outside").exists()
