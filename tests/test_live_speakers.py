@@ -2,7 +2,11 @@ import array
 
 from backend.app.audio import AudioBuffer
 from backend.app.pipelines.live_asr import LiveASRSession, StartOptions
-from backend.app.speakers.live_diarization import LiveSpeakerTracker, profile_cosine_matcher
+from backend.app.speakers.live_diarization import (
+    LiveSpeakerTracker,
+    SpeakerIdentity,
+    profile_cosine_matcher,
+)
 
 
 class FakeVAD:
@@ -36,21 +40,29 @@ def fake_match(embedding, profiles):
 
 
 class FakeASRStream:
-    def __init__(self):
+    def __init__(self, hotwords=None):
+        self.hotwords = hotwords
         self.samples = array.array("f")
         self.pending = False
+        self.finished = False
 
     def accept_waveform(self, sample_rate, samples):
         self.samples.extend(samples)
         self.pending = True
 
     def input_finished(self):
+        self.finished = True
         self.pending = True
 
 
 class FakeRecognizer:
+    def __init__(self):
+        self.streams = []
+
     def create_stream(self, hotwords=None):
-        return FakeASRStream()
+        stream = FakeASRStream(hotwords)
+        self.streams.append(stream)
+        return stream
 
     def is_ready(self, stream):
         return stream.pending
@@ -178,6 +190,49 @@ def test_speaker_change_does_not_create_text_when_recognizer_returns_empty():
     assert live.feed((b"\xff\x7f") * 32_000) == []
     assert live.feed((b"\x01\x80") * 48_000) == []
     assert live.finish() == []
+
+
+def test_long_no_endpoint_audio_rolls_over_without_loss_or_overlap():
+    recognizer = FakeRecognizer()
+    state = LiveSpeakerTracker()
+    state.current = SpeakerIdentity("speaker_a", "registered_a", "甲")
+    live = LiveASRSession(
+        recognizer, options=StartOptions(hotwords=("关键字",)), speaker_tracker=state,
+        max_segment_seconds=1.0,
+    )
+    total_samples = 40_000  # 2.5 seconds, sent as one frame across two rollovers.
+    audio = (b"\xff\x7f") * total_samples
+    events = live.feed(audio)
+    partials = [event for event in events if event["status"] == "partial"]
+    finals = [event for event in events if event["status"] == "final"]
+    finals.extend(live.finish())
+    finals = [event for event in finals if event["status"] == "final"]
+
+    assert [(event["segment_id"], event["start"], event["end"]) for event in finals] == [
+        (1, 0.0, 1.0), (2, 1.0, 2.0), (3, 2.0, 2.5),
+    ]
+    assert len({event["segment_id"] for event in finals}) == len(finals)
+    assert all(event["registered_speaker_id"] == "registered_a" for event in finals)
+    assert all(event["speaker_name"] == "甲" for event in finals)
+    for final in finals[:2]:
+        partial = next(event for event in partials if event["segment_id"] == final["segment_id"])
+        assert final["revision"] > partial["revision"]
+    assert sum(len(stream.samples) for stream in recognizer.streams) == total_samples
+    assert all(stream.hotwords == ["关键字"] for stream in recognizer.streams)
+
+
+def test_segment_cap_splits_exact_boundary_without_empty_segment():
+    live = LiveASRSession(FakeRecognizer(), speaker_tracker=LiveSpeakerTracker(),
+                          max_segment_seconds=1.0)
+
+    events = live.feed((b"\xff\x7f") * 16_000)
+
+    assert [event["status"] for event in events] == ["partial", "final"]
+    assert events[-1]["start"] == 0.0
+    assert events[-1]["end"] == 1.0
+    assert events[-1]["segment_id"] == events[0]["segment_id"]
+    assert live.segment_id == 2
+    assert len(live.segment_samples) == 0
 
 
 def test_two_trackers_keep_independent_speaker_state():

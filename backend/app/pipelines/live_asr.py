@@ -48,10 +48,16 @@ class LiveASRSession:
 
     def __init__(self, recognizer: OnlineRecognizer, *, session_id: str | None = None,
                  options: StartOptions | None = None,
-                 speaker_tracker: LiveSpeakerTracker | None = None):
+                 speaker_tracker: LiveSpeakerTracker | None = None,
+                 max_segment_seconds: float = 30.0):
         self.recognizer = recognizer
         self.session_id = session_id or f"sess_{uuid.uuid4().hex}"
         self.options = options or StartOptions()
+        if max_segment_seconds <= 0:
+            raise ValueError("max_segment_seconds 必须大于零")
+        self.max_segment_samples = round(max_segment_seconds * self.options.sample_rate)
+        if self.max_segment_samples < 1:
+            raise ValueError("max_segment_seconds 太短")
         self.stream = recognizer.create_stream(list(self.options.hotwords) or None)
         self.samples_seen = 0
         self.segment_id = 1
@@ -82,27 +88,39 @@ class LiveASRSession:
         samples = pcm_s16le_to_float32(pcm, sample_rate=self.options.sample_rate)
         if not samples:
             return []
-        start = self.duration
-        self.samples_seen += len(samples)
-        end = self.duration
-        self.segment_samples.extend(samples)
-        speaker_changes = self.speaker_tracker.feed(samples, self.samples_seen)
-        # The first confident identity labels the still-open segment; only a
-        # transition away from an established identity creates a boundary.
-        speaker_changes = [change for change in speaker_changes
-                           if (change.get("previous", {}).get("local_speaker_id") or
-                               change.get("previous", {}).get("registered_speaker_id"))]
-        if not speaker_changes:
-            self.stream.accept_waveform(self.options.sample_rate, samples)
-            return self._decode(start, end, final=False)
+        all_events: list[dict[str, Any]] = []
+        offset = 0
+        while offset < len(samples):
+            # Flush exactly at the segment limit, including when callers send
+            # unusually large PCM frames that span several segment boundaries.
+            if len(self.segment_samples) >= self.max_segment_samples:
+                all_events.extend(self._rollover_segment())
+            capacity = self.max_segment_samples - len(self.segment_samples)
+            piece = samples[offset:offset + capacity]
+            start = self.duration
+            self.samples_seen += len(piece)
+            end = self.duration
+            self.segment_samples.extend(piece)
+            offset += len(piece)
 
-        # The tracker confirms changes after looking at overlapping windows.
-        # Re-decode the buffered segment up to each estimated boundary, then
-        # start a fresh ASR stream with only the audio after that boundary.
-        events: list[dict[str, Any]] = []
-        for change in speaker_changes:
-            events.extend(self._split_at_speaker_change(change))
-        return events
+            speaker_changes = self.speaker_tracker.feed(piece, self.samples_seen)
+            # The first confident identity labels the still-open segment; only
+            # a transition away from an established identity creates a boundary.
+            speaker_changes = [change for change in speaker_changes
+                               if (change.get("previous", {}).get("local_speaker_id") or
+                                   change.get("previous", {}).get("registered_speaker_id"))]
+            if speaker_changes:
+                # The tracker confirms changes after looking at overlapping
+                # windows. Re-decode buffered audio at each estimated boundary.
+                events: list[dict[str, Any]] = []
+                for change in speaker_changes:
+                    events.extend(self._split_at_speaker_change(change))
+            else:
+                self.stream.accept_waveform(self.options.sample_rate, piece)
+                events = self._decode(start, end, final=False)
+            all_events.extend(events)
+            all_events.extend(self._rollover_if_needed())
+        return all_events
 
     def finish(self) -> list[dict[str, Any]]:
         if self.closed:
@@ -181,6 +199,25 @@ class LiveASRSession:
         while self.recognizer.is_ready(stream):
             self.recognizer.decode_stream(stream)
         return self.recognizer.get_result(stream).strip()
+
+    def _rollover_if_needed(self) -> list[dict[str, Any]]:
+        if len(self.segment_samples) < self.max_segment_samples:
+            return []
+        return self._rollover_segment()
+
+    def _rollover_segment(self) -> list[dict[str, Any]]:
+        """Finalize a long open segment and continue with a fresh ASR stream."""
+        end = self.duration
+        self.stream.input_finished()
+        events = self._decode(self.segment_start, end, final=True)
+        self.segment_id += 1
+        self.revision = 0
+        self.segment_start = end
+        self.segment_start_sample = self.samples_seen
+        self.segment_samples = array.array("f")
+        self.last_text = ""
+        self.stream = self.recognizer.create_stream(list(self.options.hotwords) or None)
+        return events
 
     def _apply_speaker(self, event: dict[str, Any]) -> None:
         speaker = self.speaker_tracker._as_dict(self.speaker_tracker.current)
