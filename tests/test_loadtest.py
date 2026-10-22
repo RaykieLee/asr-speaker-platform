@@ -89,6 +89,17 @@ def test_gate_fails_on_error_rate_and_marks_unreported_drops_unknown():
     assert gates["checks"]["max_client_backlog_seconds"]["status"] == "not_evaluable"
 
 
+def test_realtime_completion_gate_measures_after_stop_not_audio_duration():
+    summary = summarize([SessionResult(
+        "long-audio", "realtime", completed=True, audio_seconds=20,
+        final_text_seconds=20.1, completion_after_stop_seconds=0.2,
+        server_dropped_frames=0, max_client_backlog_seconds=0,
+    )])
+    gates = evaluate_gates(summary, {"max_final_p95_seconds": 8})
+    assert gates["checks"]["completion_after_stop_p95_seconds"]["status"] == "pass"
+    assert summary["latency_seconds"]["final_text"]["p95"] == pytest.approx(20.1)
+
+
 def test_file_throughput_uses_successful_samples_and_seconds_ratio(tmp_path):
     results = [
         SessionResult("success", "file", completed=True, audio_seconds=3600, processing_seconds=3600),

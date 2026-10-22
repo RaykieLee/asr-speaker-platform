@@ -100,6 +100,7 @@ class SessionResult:
     client_late_frames: int = 0
     first_partial_seconds: float | None = None
     final_text_seconds: float | None = None
+    completion_after_stop_seconds: float | None = None
     speaker_seconds: float | None = None
     final_text: str = ""
     speaker: str = ""
@@ -217,8 +218,8 @@ def evaluate_gates(summary: dict[str, Any], thresholds: dict[str, Any]) -> dict[
             summary["latency_seconds"]["first_partial"]["p95"],
             thresholds.get("max_first_partial_p95_seconds"),
         ),
-        "final_text_p95_seconds": (
-            summary["latency_seconds"]["final_text"]["p95"],
+        "completion_after_stop_p95_seconds": (
+            summary["latency_seconds"]["completion_after_stop"]["p95"],
             thresholds.get("max_final_p95_seconds"),
         ),
         "max_client_backlog_seconds": (
@@ -242,6 +243,7 @@ def evaluate_gates(summary: dict[str, Any], thresholds: dict[str, Any]) -> dict[
 
 def summarize(results: list[SessionResult]) -> dict[str, Any]:
     elapsed_values = [item.final_text_seconds for item in results if item.final_text_seconds is not None]
+    completion_values = [item.completion_after_stop_seconds for item in results if item.completion_after_stop_seconds is not None]
     partial_values = [item.first_partial_seconds for item in results if item.first_partial_seconds is not None]
     speaker_values = [item.speaker_seconds for item in results if item.speaker_seconds is not None]
     errors: dict[str, int] = {}
@@ -278,6 +280,7 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
         "latency_seconds": {
             "first_partial": {f"p{p}": percentile(partial_values, p) for p in (50, 95, 99)},
             "final_text": {f"p{p}": percentile(elapsed_values, p) for p in (50, 95, 99)},
+            "completion_after_stop": {f"p{p}": percentile(completion_values, p) for p in (50, 95, 99)},
             "speaker": {f"p{p}": percentile(speaker_values, p) for p in (50, 95, 99)},
         },
         "client_late_frames": sum(item.client_late_frames for item in results),
@@ -336,6 +339,7 @@ def write_report(
     fieldnames = [
         "run_id", "mode", "session_id", "started_at", "audio_seconds", "frames_sent", "server_dropped_frames",
         "max_client_backlog_seconds", "client_late_frames", "first_partial_seconds", "final_text_seconds",
+        "completion_after_stop_seconds",
         "speaker_seconds", "final_text", "speaker", "error", "completed", "job_id", "queue_seconds",
         "processing_seconds", "rtf",
     ]

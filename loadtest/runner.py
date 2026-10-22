@@ -119,6 +119,7 @@ async def run_live_session(
                 raise TimeoutError("start acknowledgement timed out")
 
             final_segments: dict[str, tuple[float, str]] = {}
+            stop_sent_at: float | None = None
 
             def record(event: dict[str, Any]) -> None:
                 received = time.monotonic() - result.start_monotonic
@@ -162,6 +163,8 @@ async def run_live_session(
                     raise RuntimeError(f"server_error: {event.get('code', event.get('message', event))}")
                 if _is_type(event, "completed"):
                     result.completed = True
+                    if stop_sent_at is not None:
+                        result.completion_after_stop_seconds = max(0.0, time.monotonic() - stop_sent_at)
 
             reader_error: list[BaseException] = []
 
@@ -188,6 +191,7 @@ async def run_live_session(
             result.frames_sent = int(paced["frames_sent"])
             result.max_client_backlog_seconds = float(paced["max_client_backlog_seconds"])
             result.client_late_frames = int(paced["client_late_frames"])
+            stop_sent_at = time.monotonic()
             await socket.send(json.dumps({"type": "stop"}))
             try:
                 await asyncio.wait_for(reader_task, timeout=timeout_seconds)
