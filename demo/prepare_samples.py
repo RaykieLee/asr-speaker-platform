@@ -92,13 +92,14 @@ def main() -> None:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(16_000)
-        for index in sequence:
+        for turn, index in enumerate(sequence):
             duration = len(clips[index]) / 32_000
             timeline.append({"source": f"speaker_{'a' if index == 0 else 'b'}",
                              "start": elapsed, "end": elapsed + duration})
             wav.writeframesraw(clips[index])
-            wav.writeframesraw(silence)
-            elapsed += duration + 1.0
+            if turn < len(sequence) - 1:
+                wav.writeframesraw(silence)
+            elapsed += duration + (1.0 if turn < len(sequence) - 1 else 0.0)
         wav.writeframes(b"")
     for label, path in zip(("a", "b"), SOURCES):
         shutil.copyfile(path, OUTPUT / f"speaker_{label}_enroll.wav")
