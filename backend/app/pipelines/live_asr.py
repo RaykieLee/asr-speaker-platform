@@ -58,9 +58,10 @@ class LiveASRSession:
         self.revision = 0
         self.last_text = ""
         self.segment_start = 0.0
+        self.segment_start_sample = 0
+        self.segment_samples = array.array("f")
         self.closed = False
         self.speaker_tracker = speaker_tracker or LiveSpeakerTracker()
-        self.last_segment_event: dict[str, Any] | None = None
 
     @property
     def duration(self) -> float:
@@ -84,10 +85,23 @@ class LiveASRSession:
         start = self.duration
         self.samples_seen += len(samples)
         end = self.duration
-        self.stream.accept_waveform(self.options.sample_rate, samples)
+        self.segment_samples.extend(samples)
         speaker_changes = self.speaker_tracker.feed(samples, self.samples_seen)
-        events = self._decode(start, end, final=False)
-        events.extend(self._speaker_revision(change) for change in speaker_changes)
+        # The first confident identity labels the still-open segment; only a
+        # transition away from an established identity creates a boundary.
+        speaker_changes = [change for change in speaker_changes
+                           if (change.get("previous", {}).get("local_speaker_id") or
+                               change.get("previous", {}).get("registered_speaker_id"))]
+        if not speaker_changes:
+            self.stream.accept_waveform(self.options.sample_rate, samples)
+            return self._decode(start, end, final=False)
+
+        # The tracker confirms changes after looking at overlapping windows.
+        # Re-decode the buffered segment up to each estimated boundary, then
+        # start a fresh ASR stream with only the audio after that boundary.
+        events: list[dict[str, Any]] = []
+        for change in speaker_changes:
+            events.extend(self._split_at_speaker_change(change))
         return events
 
     def finish(self) -> list[dict[str, Any]]:
@@ -110,40 +124,67 @@ class LiveASRSession:
             event = self._event("final", text, start=self.segment_start, end=end)
             self._apply_speaker(event)
             events.append(event)
-            self.last_segment_event = None
             self.last_text = ""
             if not final:
                 self.segment_id += 1
                 self.revision = 0
                 self.segment_start = end
+                self.segment_start_sample = self.samples_seen
+                self.segment_samples = array.array("f")
                 self.stream = self.recognizer.create_stream(list(self.options.hotwords) or None)
         elif text and text != self.last_text:
             self.revision += 1
             event = self._event("partial", text, start=self.segment_start, end=end)
             self._apply_speaker(event)
             events.append(event)
-            self.last_segment_event = event
             self.last_text = text
         return events
+
+    def _split_at_speaker_change(self, change: dict[str, Any]) -> list[dict[str, Any]]:
+        boundary_sample = round(float(change["start"]) * self.options.sample_rate)
+        boundary_sample = max(self.segment_start_sample,
+                              min(self.samples_seen, boundary_sample))
+        split_index = boundary_sample - self.segment_start_sample
+        split_index = max(0, min(len(self.segment_samples), split_index))
+        before = array.array("f", self.segment_samples[:split_index])
+        after = array.array("f", self.segment_samples[split_index:])
+
+        # Rebuild and flush the old side so its final text cannot include any
+        # post-boundary samples that were already seen while the change settled.
+        old_text = self._recognize_final(before)
+        events: list[dict[str, Any]] = []
+        if old_text:
+            self.revision += 1
+            event = self._event("final", old_text, start=self.segment_start,
+                                end=boundary_sample / self.options.sample_rate)
+            event.update(change.get("previous") or {})
+            events.append(event)
+
+        self.segment_id += 1
+        self.revision = 0
+        self.segment_start_sample = boundary_sample
+        self.segment_start = boundary_sample / self.options.sample_rate
+        self.segment_samples = after
+        self.last_text = ""
+        self.stream = self.recognizer.create_stream(list(self.options.hotwords) or None)
+        if after:
+            self.stream.accept_waveform(self.options.sample_rate, after)
+            events.extend(self._decode(self.segment_start, self.duration, final=False))
+        return events
+
+    def _recognize_final(self, samples: array.array) -> str:
+        if not samples:
+            return ""
+        stream = self.recognizer.create_stream(list(self.options.hotwords) or None)
+        stream.accept_waveform(self.options.sample_rate, samples)
+        stream.input_finished()
+        while self.recognizer.is_ready(stream):
+            self.recognizer.decode_stream(stream)
+        return self.recognizer.get_result(stream).strip()
 
     def _apply_speaker(self, event: dict[str, Any]) -> None:
         speaker = self.speaker_tracker._as_dict(self.speaker_tracker.current)
         event.update(speaker)
-
-    def _speaker_revision(self, change: dict[str, Any]) -> dict[str, Any]:
-        """Revise the displayed segment in place after a confirmed boundary."""
-        current = self.last_segment_event
-        if current is None:
-            return {"type": "speaker_change", "session_id": self.session_id, **change}
-        self.revision = max(self.revision, int(current["revision"])) + 1
-        corrected = dict(current)
-        corrected.update(change["speaker"])
-        corrected.update(type="segment", status="corrected", revision=self.revision,
-                         end=max(float(current["end"]), float(change["end"])),
-                         speaker_change_at=change["start"])
-        self.last_segment_event = corrected
-        return corrected
-
 
 class LiveASRService:
     """Factory seam used by the API and fake recognizers in tests."""

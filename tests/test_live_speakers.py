@@ -37,11 +37,11 @@ def fake_match(embedding, profiles):
 
 class FakeASRStream:
     def __init__(self):
-        self.text = ""
+        self.samples = array.array("f")
         self.pending = False
 
     def accept_waveform(self, sample_rate, samples):
-        self.text = "实时识别文本"
+        self.samples.extend(samples)
         self.pending = True
 
     def input_finished(self):
@@ -59,7 +59,9 @@ class FakeRecognizer:
         stream.pending = False
 
     def get_result(self, stream):
-        return stream.text
+        if not stream.samples:
+            return ""
+        return "甲的识别文本" if sum(stream.samples) >= 0 else "乙的识别文本"
 
     def is_endpoint(self, stream):
         return False
@@ -139,19 +141,43 @@ def test_profile_matcher_rejects_embedding_dimension_mismatch():
     assert result is None
 
 
-def test_confirmed_switch_emits_higher_revision_for_same_segment_id():
+def test_confirmed_switch_finalizes_old_segment_and_starts_non_overlapping_segment():
     live = LiveASRSession(FakeRecognizer(), options=StartOptions(), speaker_tracker=tracker())
     first = live.feed((b"\xff\x7f") * 32_000)
     assert first[0]["status"] == "partial"
     original_id = first[0]["segment_id"]
     later_audio = (b"\x01\x80") * 48_000
-    revised = live.feed(later_audio)
-    correction = next(event for event in revised if event.get("status") == "corrected")
+    switched = live.feed(later_audio)
+    final_old = next(event for event in switched if event["status"] == "final")
+    partial_new = next(event for event in switched if event["status"] == "partial")
 
-    assert correction["segment_id"] == original_id
-    assert correction["revision"] > first[0]["revision"]
-    assert correction["registered_speaker_id"] == "registered_b"
-    assert correction["text"] == first[0]["text"]
+    assert final_old["segment_id"] == original_id
+    assert final_old["revision"] > first[0]["revision"]
+    assert final_old["text"] == "甲的识别文本"
+    assert final_old["registered_speaker_id"] == "registered_a"
+    assert partial_new["segment_id"] == original_id + 1
+    assert partial_new["start"] == final_old["end"]
+    assert partial_new["text"] == "乙的识别文本"
+    assert partial_new["registered_speaker_id"] == "registered_b"
+    assert all(event["status"] != "corrected" for event in switched)
+
+    tail = live.finish()
+    final_new = next(event for event in tail if event["status"] == "final")
+    assert final_new["segment_id"] == partial_new["segment_id"]
+    assert final_new["text"] == "乙的识别文本"
+    assert final_new["start"] == final_old["end"]
+    assert final_new["registered_speaker_id"] == "registered_b"
+
+
+def test_speaker_change_does_not_create_text_when_recognizer_returns_empty():
+    class EmptyRecognizer(FakeRecognizer):
+        def get_result(self, stream):
+            return ""
+
+    live = LiveASRSession(EmptyRecognizer(), options=StartOptions(), speaker_tracker=tracker())
+    assert live.feed((b"\xff\x7f") * 32_000) == []
+    assert live.feed((b"\x01\x80") * 48_000) == []
+    assert live.finish() == []
 
 
 def test_two_trackers_keep_independent_speaker_state():
