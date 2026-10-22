@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7fa">
+  <title>声笺 · 本地语音工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#" aria-label="声笺工作台">
+        <span class="brand-mark"><i></i><i></i><i></i></span>
+        <span><strong>声笺</strong><small>LOCAL VOICE STUDIO</small></span>
+      </a>
+      <div class="workspace-label">工作空间 <span>⌄</span></div>
+      <nav class="navigation" aria-label="主导航">
+        <button class="nav-item active" data-view="live"><span class="nav-icon">◉</span>实时识别 <span class="nav-kbd">01</span></button>
+        <button class="nav-item" data-view="files"><span class="nav-icon">▤</span>文件转写 <span class="nav-kbd">02</span></button>
+        <button class="nav-item" data-view="speakers"><span class="nav-icon">♙</span>声纹人员 <span class="nav-kbd">03</span></button>
+        <button class="nav-item" data-view="hotwords"><span class="nav-icon">✳</span>热词词库 <span class="nav-kbd">04</span></button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="local-card">
+        <span class="local-lock">⌑</span>
+        <div><strong>本地优先</strong><p>音频仅发送到你的识别服务</p></div>
+        <span class="status-dot" id="sidebar-status-dot"></span>
+      </div>
+      <div class="sidebar-footer">ASR PLATFORM <span>v0.1</span></div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumbs"><span>工作空间</span><b>/</b><strong id="current-section">实时识别</strong></div>
+        <div class="topbar-actions">
+          <label class="endpoint-label" for="api-origin">服务地址</label>
+          <input id="api-origin" class="endpoint-input" value="" aria-label="服务地址" placeholder="自动使用当前地址">
+          <button class="icon-button" id="refresh-button" title="刷新数据" aria-label="刷新数据">↻</button>
+          <div class="connection-pill" id="connection-pill"><span class="status-dot"></span><span>正在连接</span></div>
+        </div>
+      </header>
+
+      <div class="page-wrap">
+        <section class="page-heading">
+          <div>
+            <p class="eyebrow" id="page-eyebrow">VOICE CAPTURE / 01</p>
+            <h1 id="page-title">让每段对话，都有迹可循。</h1>
+            <p class="page-subtitle" id="page-description">实时查看识别结果与说话人状态，录音会直接送往你配置的本地服务。</p>
+          </div>
+          <div class="heading-meta"><span class="meta-icon">⌘</span><span>模型与音频由本地服务处理</span></div>
+        </section>
+
+        <div class="notice-banner" id="service-notice" role="status">
+          <span class="notice-icon">i</span>
+          <div><strong id="notice-title">正在检查识别服务</strong><span id="notice-copy">联机状态和模型可用性将在连接后显示。</span></div>
+          <button class="notice-close" id="dismiss-notice" aria-label="关闭提示">×</button>
+        </div>
+
+        <section class="view active" id="view-live" aria-labelledby="page-title">
+          <div class="live-grid">
+            <article class="panel live-panel">
+              <div class="panel-topline"><span class="section-label">LIVE SESSION</span><span class="protocol-tag">16 kHz <i></i> PCM / S16LE</span></div>
+              <div class="live-stage">
+                <div class="stage-orbit orbit-one"></div><div class="stage-orbit orbit-two"></div>
+                <div class="mic-disc" id="mic-disc"><span class="mic-glyph">♩</span></div>
+                <div class="wave-bars" id="wave-bars" aria-hidden="true"></div>
+                <div class="stage-caption"><strong id="live-state-title">准备开始</strong><span id="live-state-copy">点击开始，允许使用麦克风</span></div>
+              </div>
+              <div class="live-controls">
+                <label class="select-wrap"><span>热词方案</span><select id="live-hotword"><option value="">不使用热词</option></select></label>
+                <div class="button-row"><button class="button button-primary" id="start-live"><span>●</span>开始录音</button><button class="button button-stop" id="stop-live" disabled>结束会话</button></div>
+              </div>
+              <p class="microcopy"><span class="tiny-lock">⌑</span>录音只在会话期间实时传输，不会在网页保存音频。</p>
+            </article>
+
+            <article class="panel transcript-panel">
+              <div class="panel-heading"><div><span class="section-label">TRANSCRIPT</span><h2>实时文字</h2></div><button class="text-button" id="clear-live">清空记录 <span>↗</span></button></div>
+              <div class="live-metrics"><div><span>会话时长</span><strong id="live-duration">00:00</strong></div><div><span>片段数量</span><strong id="live-segment-count">0</strong></div><div><span>热词版本</span><strong id="live-hotword-version">—</strong></div></div>
+              <div class="transcript-list" id="live-transcript" aria-live="polite"><div class="empty-state"><span class="empty-wave">∿</span><strong>等你开口</strong><p>partial 会持续更新，final 片段会固定显示。</p></div></div>
+              <div class="transcript-footer"><span><i class="legend-partial"></i>识别中</span><span><i class="legend-final"></i>已定稿</span><span class="speaker-hint">说话人标签由模型能力决定</span></div>
+            </article>
+          </div>
+          <div class="info-strip"><span class="strip-icon">↗</span><div><strong>首次使用麦克风？</strong><span>请通过 localhost 或 HTTPS 打开网页，并在浏览器提示中允许麦克风访问。</span></div><button class="text-button" data-navigate="files">改用文件识别 <b>→</b></button></div>
+        </section>
+
+        <section class="view" id="view-files">
+          <div class="file-layout">
+            <article class="panel upload-panel">
+              <div class="panel-heading"><div><span class="section-label">FILE TRANSCRIPTION</span><h2>上传一段音频</h2></div><span class="soft-tag">WAV · MP3 · M4A · FLAC</span></div>
+              <label class="dropzone" id="dropzone" for="audio-file">
+                <input id="audio-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg,.webm,.aac">
+                <span class="upload-icon">↑</span><strong id="file-prompt">拖入音频文件，或 <u>浏览文件</u></strong>
+                <span id="file-details">支持常见音频格式，最大 512 MB</span>
+              </label>
+              <div class="form-row"><label class="select-wrap"><span>语言</span><select id="file-language"><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">English</option></select></label>
+                <label class="select-wrap"><span>热词方案</span><select id="file-hotword"><option value="">不使用热词</option></select></label></div>
+              <button class="button button-primary wide-button" id="upload-file" disabled><span>↑</span>开始转写</button>
+              <div class="upload-progress hidden" id="upload-progress"><div class="progress-copy"><span id="job-state">正在上传</span><span id="job-percent">—</span></div><div class="progress-track"><i id="job-progress-bar"></i></div><small id="job-id-copy"></small></div>
+              <div class="form-error hidden" id="upload-error"></div>
+            </article>
+            <article class="panel results-panel">
+              <div class="panel-heading"><div><span class="section-label">RESULT</span><h2>转写结果</h2></div><button class="icon-button" id="copy-result" title="复制文本" aria-label="复制文本">▣</button></div>
+              <div class="result-summary hidden" id="result-summary"><span class="summary-pill" id="result-status">完成</span><span id="result-duration">—</span><span id="result-model">—</span></div>
+              <div class="result-list" id="file-results"><div class="empty-state"><span class="empty-wave">▤</span><strong>转写完成后，结果会显示在这里</strong><p>段落包含时间范围、识别文字和可用的说话人标记。</p></div></div>
+              <div class="result-footer hidden" id="result-footer"><span id="result-speaker-status">说话人识别状态</span><button class="text-button" id="download-result">导出 JSON <b>↓</b></button></div>
+            </article>
+          </div>
+          <div class="info-strip"><span class="strip-icon">i</span><div><strong>模型未配置时不会生成模拟结果</strong><span>如果任务失败，请检查服务启动环境中的 ASR_OFFLINE_MODEL_DIR 和模型文件。</span></div></div>
+        </section>
+
+        <section class="view" id="view-speakers">
+          <div class="section-intro"><div><p class="eyebrow">VOICE IDENTITY</p><h2>人员声纹</h2><p>录入清晰、单人、至少 1 秒的语音样本。模型未配置时，网页会保留人员记录但无法完成注册。</p></div><button class="button button-primary" id="new-speaker-button">＋ 新建人员</button></div>
+          <div class="speaker-layout"><article class="panel speaker-list-panel"><div class="panel-heading"><div><span class="section-label">REGISTERED PEOPLE</span><h2>人员列表 <span class="count-badge" id="speaker-count">0</span></h2></div><button class="text-button" id="refresh-speakers">刷新 <b>↻</b></button></div><div id="speaker-list" class="speaker-list"><div class="empty-state compact"><strong>还没有人员记录</strong><p>创建人员后即可上传声纹样本。</p></div></div></article>
+            <article class="panel enrollment-panel"><div class="panel-heading"><div><span class="section-label">ENROLLMENT</span><h2 id="enrollment-title">录入声纹样本</h2></div></div><div id="enrollment-empty" class="enrollment-empty"><span class="enroll-illustration">♙</span><strong>先选择或新建一位人员</strong><p>上传单人清晰语音，系统会检查时长和削波，再生成声纹 profile。</p></div><div id="enrollment-form" class="hidden"><div class="selected-person"><span class="avatar" id="selected-avatar">林</span><div><strong id="selected-name">—</strong><small id="selected-profile">尚无已注册 profile</small></div><span class="selected-check">✓</span></div><label class="sample-picker"><input id="speaker-audio" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac"><span>＋</span><div><strong id="speaker-file-name">选择语音样本</strong><small>推荐 3–10 秒、单声道、清晰人声</small></div><b>浏览</b></label><button class="button button-primary wide-button" id="upload-speaker-sample" disabled>上传并检查样本</button><div class="form-error hidden" id="speaker-error"></div><div class="quality-card hidden" id="quality-card"></div></div></article></div>
+        </section>
+
+        <section class="view" id="view-hotwords">
+          <div class="section-intro"><div><p class="eyebrow">CONTEXT BOOST</p><h2>热词方案</h2><p>为人名、产品名和项目术语建立版本化词库。热词仅提高识别概率，不保证必然输出。</p></div><button class="button button-primary" id="new-hotword-button">＋ 新建方案</button></div>
+          <div class="hotword-layout"><article class="panel hotword-list-panel"><div class="panel-heading"><div><span class="section-label">LIBRARY</span><h2>词库列表 <span class="count-badge" id="hotword-count">0</span></h2></div><button class="text-button" id="refresh-hotwords">刷新 <b>↻</b></button></div><div class="hotword-list" id="hotword-list"><div class="empty-state compact"><strong>还没有热词方案</strong><p>创建后可在实时和文件识别中选用。</p></div></div></article>
+            <article class="panel hotword-editor"><div class="panel-heading"><div><span class="section-label">VERSIONED EDITOR</span><h2 id="hotword-editor-title">编辑方案</h2></div><span id="hotword-version" class="version-badge">未选择</span></div><div id="hotword-editor-empty" class="enrollment-empty"><span class="enroll-illustration">✳</span><strong>选择或创建一个方案</strong><p>每行输入一个词或短语。保存时会生成一个新版本。</p></div><div id="hotword-editor-form" class="hotword-form hidden"><label class="field-label">方案名称<input id="hotword-name" maxlength="100" placeholder="例如：产品与人名"></label><label class="field-label">热词列表<textarea id="hotword-entries" rows="10" placeholder="李子熙&#10;云端工作台&#10;智能语音助手"></textarea><small>每行一条，最多 256 个字符。含 BPE 的模型会使用当前模型词表编译 token。</small></label><div class="weight-row"><label class="field-label">热词权重 <span id="weight-value">1.0</span><input id="hotword-weight" type="range" min="0.5" max="10" step="0.5" value="1"></label></div><div class="editor-actions"><button class="button button-secondary" id="deactivate-hotword">停用方案</button><button class="button button-primary" id="save-hotword">保存新版本</button></div><div class="form-error hidden" id="hotword-error"></div></div></article></div>
+        </section>
+
+        <footer class="page-footer"><span>声笺 · 本地语音工作台</span><span>API <code id="footer-api">当前页面地址</code></span><a href="/docs" target="_blank" rel="noreferrer">打开 API 文档 ↗</a></footer>
+      </div>
+    </main>
+  </div>
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <script type="module" src="/app.mjs"></script>
+</body>
+</html>
