@@ -192,7 +192,7 @@ function renderJob(job) {
   $('result-status').textContent = job.status; $('result-duration').textContent = display.duration != null ? formatTime(display.duration) : '—';
   $('result-model').textContent = job.model_version || job.result_metadata?.model_version || '模型版本未知';
   const segments = display.segments;
-  if (segments.length) $('file-results').innerHTML = segments.map(s => `<div class="result-segment"><div class="result-time">${formatTime(s.start)} – ${formatTime(s.end)} <span>${escapeHtml(s.speaker_name || '说话人未标注')}</span></div><p>${escapeHtml(s.text || '')}</p></div>`).join('');
+  if (segments.length) $('file-results').innerHTML = segments.map(s => `<div class="result-segment"><div class="result-time">${formatTime(s.start)} – ${formatTime(s.end)} ${Number.isInteger(s.metadata?.channel_index) ? `<span>声道 ${s.metadata.channel_index + 1}</span>` : ''}<span>${escapeHtml(s.speaker_name || '说话人未标注')}</span></div><p>${escapeHtml(s.text || '')}</p></div>`).join('');
   else if (display.text) $('file-results').innerHTML = `<div class="result-segment"><p>${escapeHtml(display.text)}</p></div>`;
   if (job.status === 'failed') { $('upload-error').textContent = job.error_message || '任务失败'; $('upload-error').classList.remove('hidden'); }
   else clearError($('upload-error'));
@@ -241,7 +241,7 @@ async function saveSpeakerCorrection(job, localId, card) {
 async function submitFile() {
   const file = $('audio-file').files[0]; if (!file) return;
   clearError($('upload-error')); $('upload-progress').classList.remove('hidden'); $('job-state').textContent = '正在上传'; $('job-id-copy').textContent = '';
-  const data = new FormData(); data.append('file', file); data.append('language', $('file-language').value); data.append('channel_mode','mixdown'); if($('file-hotword').value) data.append('hotword_set_id',$('file-hotword').value);
+  const data = new FormData(); data.append('file', file); data.append('language', $('file-language').value); data.append('channel_mode',$('file-channel-mode').value); if($('file-hotword').value) data.append('hotword_set_id',$('file-hotword').value);
   try {
     const created = await request('/api/v1/transcriptions', {method:'POST', body:data}); state.job = created; $('job-id-copy').textContent = `任务 ${created.job_id}`;
     const poll = async () => { const job = await request(created.status_url); renderJob(job); if(['queued','running','pending'].includes(job.status)) state.poll = setTimeout(poll,1200); };

@@ -96,7 +96,8 @@
                 <span id="file-details">支持常见音频格式，最大 512 MB</span>
               </label>
               <div class="form-row"><label class="select-wrap"><span>语言</span><select id="file-language"><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">English</option></select></label>
-                <label class="select-wrap"><span>热词方案</span><select id="file-hotword"><option value="">不使用热词</option></select></label></div>
+                <label class="select-wrap"><span>热词方案</span><select id="file-hotword"><option value="">不使用热词</option></select></label>
+                <label class="select-wrap"><span>声道处理</span><select id="file-channel-mode"><option value="mixdown">合并声道</option><option value="separate">左右声道分别识别（双麦录音）</option></select></label></div>
               <button class="button button-primary wide-button" id="upload-file" disabled><span>↑</span>开始转写</button>
               <div class="upload-progress hidden" id="upload-progress"><div class="progress-copy"><span id="job-state">正在上传</span><span id="job-percent">—</span></div><div class="progress-track"><i id="job-progress-bar"></i></div><small id="job-id-copy"></small></div>
               <div class="form-error hidden" id="upload-error"></div>
