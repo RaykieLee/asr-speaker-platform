@@ -1,5 +1,6 @@
 import { authorizationHeaders, formatTime, hotwordEntriesToText, hotwordId,
-  mergeHotwordEntries, normalizeJobForDisplay, resampleTo16k, streamStartMessage, toS16LE } from './logic.mjs';
+  groupCorrectionTargets, mergeHotwordEntries, normalizeJobForDisplay, resampleTo16k,
+  speakerCorrectionPayload, streamStartMessage, toS16LE } from './logic.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = { hotwords: [], speakers: [], selectedSpeaker: null, selectedHotword: null,
@@ -196,6 +197,46 @@ function renderJob(job) {
   if (job.status === 'failed') { $('upload-error').textContent = job.error_message || '任务失败'; $('upload-error').classList.remove('hidden'); }
   else clearError($('upload-error'));
   $('result-speaker-status').textContent = `说话人处理：${display.speakerDiarization}`;
+  if (job.status === 'succeeded') renderSpeakerCorrections(job, segments);
+  else { $('speaker-corrections').classList.add('hidden'); $('speaker-corrections').innerHTML = ''; }
+}
+
+async function renderSpeakerCorrections(job, segments) {
+  const container = $('speaker-corrections');
+  const jobId = job.job_id || job.id || state.job?.job_id;
+  const groups = groupCorrectionTargets(segments);
+  if (!groups.length) { container.classList.add('hidden'); container.innerHTML = ''; return; }
+  container.classList.remove('hidden');
+  container.innerHTML = '<div class="correction-heading"><strong>说话人标签纠错</strong><span>修正会同步更新结果和后续导出</span></div><p class="correction-loading">正在读取已注册人员…</p>';
+  let people = [];
+  let loadError = null;
+  try { people = await request('/api/v1/speakers'); state.speakers = people; }
+  catch (error) { loadError = error; }
+  if (state.job?.job_id && state.job.job_id !== jobId) return;
+  container.innerHTML = `<div class="correction-heading"><strong>说话人标签纠错</strong><span>按本地说话人统一修改，保存后会刷新有效片段与导出数据</span></div>${groups.map(group => {
+    const options = people.map(person => { const id=person.speaker_id || person.id; return `<option value="${escapeHtml(id)}">${escapeHtml(person.name)}</option>`; }).join('');
+    return `<div class="correction-card" data-local="${escapeHtml(group.local_speaker_id)}"><div class="correction-person"><strong>${escapeHtml(group.local_speaker_id)}</strong><span>${group.count} 个片段 · 当前：${escapeHtml(group.display_name || '未标注')}</span></div><div class="correction-fields"><label>已注册人员<select class="correction-select"><option value="">选择人员…</option>${options}</select></label><label>或填写显示名称<input class="correction-name" maxlength="100" placeholder="例如：访谈嘉宾 A"></label><button class="button button-secondary correction-save">保存纠错</button></div><div class="form-error correction-error hidden"></div></div>`;
+  }).join('')}${loadError ? `<div class="form-error">读取人员列表失败：${escapeHtml(loadError.message)}；仍可使用显示名称纠错。</div>` : ''}`;
+  container.querySelectorAll('.correction-card').forEach((card, index) => {
+    const group = groups[index];
+    const select = card.querySelector('.correction-select'); const name = card.querySelector('.correction-name');
+    select.addEventListener('change', () => { name.disabled = Boolean(select.value); if (select.value) name.value = ''; });
+    name.addEventListener('input', () => { select.disabled = Boolean(name.value.trim()); if (name.value.trim()) select.value = ''; });
+    card.querySelector('.correction-save').addEventListener('click', () => saveSpeakerCorrection({...job, job_id:jobId}, group.local_speaker_id, card));
+  });
+}
+
+async function saveSpeakerCorrection(job, localId, card) {
+  const button = card.querySelector('.correction-save'); const select=card.querySelector('.correction-select'); const name=card.querySelector('.correction-name'); const errorNode=card.querySelector('.correction-error');
+  clearError(errorNode); button.disabled = true; button.textContent = '正在保存…';
+  try {
+    const body = speakerCorrectionPayload({registeredSpeakerId:select.value, displayName:name.value});
+    await request(`/api/v1/transcriptions/${encodeURIComponent(job.job_id || state.job.job_id)}/speakers/${encodeURIComponent(localId)}`, {method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    toast('说话人纠错已保存');
+    const refreshed = await request(job.status_url || state.job.status_url);
+    renderJob(refreshed);
+  } catch(error) { showError(errorNode,error); }
+  finally { if (button.isConnected) { button.disabled=false; button.textContent='保存纠错'; } }
 }
 async function submitFile() {
   const file = $('audio-file').files[0]; if (!file) return;

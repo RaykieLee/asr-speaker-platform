@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authorizationHeaders, formatTime, hotwordEntriesToText, hotwordId,
-  mergeHotwordEntries, normalizeJobForDisplay, percentile, resampleTo16k,
-  streamStartMessage, toS16LE } from './public/logic.mjs';
+  groupCorrectionTargets, mergeHotwordEntries, normalizeJobForDisplay, percentile,
+  resampleTo16k, speakerCorrectionPayload, streamStartMessage, toS16LE } from './public/logic.mjs';
 
 test('percentile uses nearest-rank and handles empty input', () => {
   assert.equal(percentile([10, 1, 3, 2], 0.5), 2);
@@ -48,4 +48,19 @@ test('optional API token is attached to HTTP and WebSocket authentication', () =
     type:'start',protocol_version:1,sample_rate:16000,format:'s16le',channels:1,
     hotword_set_id:'hw_1',api_key:'secret',
   });
+});
+
+test('speaker correction groups segments by local identity and creates exclusive payloads', () => {
+  assert.deepEqual(groupCorrectionTargets([
+    {local_speaker_id:'speaker_0',speaker:{display_name:'预测甲'}},
+    {local_speaker_id:'speaker_0'},
+    {local_speaker_id:'speaker_1'},
+    {text:'no diarization'},
+  ]), [
+    {local_speaker_id:'speaker_0',count:2,display_name:'预测甲'},
+    {local_speaker_id:'speaker_1',count:1,display_name:''},
+  ]);
+  assert.deepEqual(speakerCorrectionPayload({registeredSpeakerId:'spk_1',displayName:'ignored'}), {registered_speaker_id:'spk_1'});
+  assert.deepEqual(speakerCorrectionPayload({displayName:'  嘉宾 A  '}), {display_name:'嘉宾 A'});
+  assert.throws(() => speakerCorrectionPayload({}), /请选择/);
 });

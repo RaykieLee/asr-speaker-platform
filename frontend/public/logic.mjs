@@ -75,6 +75,26 @@ export function normalizeJobForDisplay(job = {}) {
   };
 }
 
+export function groupCorrectionTargets(segments = []) {
+  const groups = new Map();
+  for (const segment of segments) {
+    const localId = segment.local_speaker_id;
+    if (!localId) continue;
+    if (!groups.has(localId)) groups.set(localId, { local_speaker_id: localId, count: 0,
+      display_name: segment.speaker?.display_name || segment.speaker_name ||
+        segment.original_prediction?.speaker_name || segment.metadata?.speaker_name || '' });
+    groups.get(localId).count++;
+  }
+  return [...groups.values()];
+}
+
+export function speakerCorrectionPayload({ registeredSpeakerId, displayName }) {
+  if (registeredSpeakerId) return { registered_speaker_id: registeredSpeakerId };
+  const cleanName = String(displayName || '').trim();
+  if (cleanName) return { display_name: cleanName };
+  throw new Error('请选择已注册人员或填写显示名称');
+}
+
 export function authorizationHeaders(token, base = {}) {
   const headers = new Headers(base);
   if (token?.trim()) headers.set('Authorization', `Bearer ${token.trim()}`);
