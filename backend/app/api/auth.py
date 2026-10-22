@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import os
+import time
 import uuid
 
 from fastapi import Request, WebSocket
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("asr.api")
 
 
 def _configured_key() -> str | None:
@@ -39,14 +43,20 @@ def authorized_websocket(websocket: WebSocket, start_message: dict) -> bool:
 
 
 async def api_key_middleware(request: Request, call_next):
+    started = time.perf_counter()
     key = _configured_key()
     token = _bearer(request.headers.get("authorization"))
     if request.url.path.startswith("/api/v1/") and not _valid(token):
-        return JSONResponse(status_code=401, content={
+        response = JSONResponse(status_code=401, content={
             "type": "error", "code": "unauthorized", "message": "API Key 无效或未提供",
             "request_id": uuid.uuid4().hex,
         })
-    if key is not None and _valid(token):
-        request.state.actor = "admin"
-        request.state.actor_verified = True
-    return await call_next(request)
+    else:
+        if key is not None and _valid(token):
+            request.state.actor = "admin"
+            request.state.actor_verified = True
+        response = await call_next(request)
+    logger.info("http method=%s path=%s status=%d duration_ms=%.1f",
+                request.method, request.url.path, response.status_code,
+                (time.perf_counter() - started) * 1000)
+    return response

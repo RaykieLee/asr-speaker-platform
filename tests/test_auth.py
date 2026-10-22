@@ -6,7 +6,7 @@ from backend.app.api.auth import authorized_websocket
 from backend.app.main import app
 
 
-def test_http_api_key_protects_platform_routes_but_health_is_public(tmp_path, monkeypatch):
+def test_http_api_key_protects_platform_routes_but_health_is_public(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("ASR_API_TOKEN", "local-secret")
     monkeypatch.setenv("ASR_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("ASR_ONLINE_MODEL_DIR", raising=False)
@@ -18,6 +18,7 @@ def test_http_api_key_protects_platform_routes_but_health_is_public(tmp_path, mo
         response = client.get("/api/v1/status", headers={"Authorization": "Bearer local-secret"})
         assert response.status_code == 200
         assert response.json()["max_streams"] == 16
+    assert "local-secret" not in caplog.text
 
 
 def test_browser_websocket_key_must_match_configured_secret(monkeypatch):
