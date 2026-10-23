@@ -72,6 +72,48 @@ def _is_type(event: dict[str, Any], *names: str) -> bool:
     return kind in names or status in names
 
 
+def _remember_server_error(result: SessionResult, event: dict[str, Any]) -> None:
+    nested = event.get("error") if isinstance(event.get("error"), dict) else {}
+    code = event.get("code", event.get("error_code", nested.get("code")))
+    message = event.get("message", event.get("detail", nested.get("message", "")))
+    if code is not None:
+        result.server_error_code = str(code)
+    if message is not None:
+        result.server_error_message = str(message)
+
+
+def _remember_websocket_close(result: SessionResult, error: BaseException) -> None:
+    """Extract close diagnostics across websockets versions and fake clients."""
+    code = getattr(error, "code", None)
+    reason = getattr(error, "reason", None)
+    received = getattr(error, "rcvd", None)
+    if received is not None:
+        code = getattr(received, "code", code)
+        reason = getattr(received, "reason", reason)
+    try:
+        if code is not None:
+            result.websocket_close_code = int(code)
+    except (TypeError, ValueError):
+        pass
+    if reason:
+        result.websocket_close_reason = str(reason)
+
+
+def _server_error_text(result: SessionResult) -> str:
+    code = result.server_error_code or "unknown"
+    return f"server_error:{code}"
+
+
+async def _bounded_reader_drain(task: asyncio.Task[Any], *, timeout_seconds: float = 0.05) -> None:
+    """Let already queued diagnostics reach the reader without stalling a run."""
+    if task.done():
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+    except TimeoutError:
+        pass
+
+
 async def run_live_session(
     *,
     pcm: bytes,
@@ -129,8 +171,9 @@ async def run_live_session(
                 if _is_type(event, "ready", "started", "session_started", "start_ack"):
                     result.session_id = str(event.get("session_id", ""))
                     break
-                if _is_type(event, "error"):
-                    raise RuntimeError(f"server_error: {event.get('code', event.get('message', event))}")
+                if _is_type(event, "error", "server_error"):
+                    _remember_server_error(result, event)
+                    raise RuntimeError(_server_error_text(result))
                 first_event = event
                 break
             else:
@@ -143,6 +186,9 @@ async def run_live_session(
 
             def record(event: dict[str, Any]) -> None:
                 nonlocal final_event_sequence
+                if _is_type(event, "error", "server_error"):
+                    _remember_server_error(result, event)
+                    return
                 received = time.monotonic() - result.start_monotonic
                 if not result.session_id and event.get("session_id"):
                     result.session_id = str(event["session_id"])
@@ -198,8 +244,6 @@ async def run_live_session(
                             result.speaker_seconds = received
                 if "dropped_frames" in event:
                     result.server_dropped_frames = int(event["dropped_frames"])
-                if _is_type(event, "error"):
-                    raise RuntimeError(f"server_error: {event.get('code', event.get('message', event))}")
                 if _is_type(event, "completed"):
                     result.completed = True
                     if stop_sent_at is not None:
@@ -227,20 +271,49 @@ async def run_live_session(
 
             reader_task = asyncio.create_task(reader())
             audio_started_at = time.monotonic()
-            paced = await pace_pcm(pcm, socket.send, frame_ms=frame_ms)
-            result.frames_sent = int(paced["frames_sent"])
-            result.max_client_backlog_seconds = float(paced["max_client_backlog_seconds"])
-            result.client_late_frames = int(paced["client_late_frames"])
-            stop_sent_at = time.monotonic()
-            await socket.send(json.dumps({"type": "stop"}))
             try:
-                await asyncio.wait_for(reader_task, timeout=timeout_seconds)
-            except TimeoutError:
-                reader_task.cancel()
-                await asyncio.gather(reader_task, return_exceptions=True)
-                raise TimeoutError("stream completion timed out")
-            if reader_error:
-                raise reader_error[0]
+                async def send_audio(frame: bytes) -> None:
+                    if result.server_error_code or reader_error:
+                        # Give the reader a chance to consume the close frame that
+                        # often follows a structured server error (for example 1013).
+                        await asyncio.sleep(0.02)
+                        if reader_error:
+                            raise reader_error[0]
+                        raise RuntimeError(_server_error_text(result))
+                    try:
+                        await socket.send(frame)
+                    except Exception:
+                        # A close can race the reader: send() may fail in the same
+                        # turn that the server error was queued. Drain briefly before
+                        # finally cancels the reader so structured diagnostics win.
+                        await _bounded_reader_drain(reader_task)
+                        raise
+
+                def progress(frames_sent: int, backlog: float, late_frames: int) -> None:
+                    result.frames_sent = frames_sent
+                    result.max_client_backlog_seconds = backlog
+                    result.client_late_frames = late_frames
+
+                paced = await pace_pcm(pcm, send_audio, frame_ms=frame_ms, on_progress=progress)
+                result.frames_sent = int(paced["frames_sent"])
+                result.max_client_backlog_seconds = float(paced["max_client_backlog_seconds"])
+                result.client_late_frames = int(paced["client_late_frames"])
+                if result.server_error_code:
+                    raise RuntimeError(_server_error_text(result))
+                if reader_error:
+                    raise reader_error[0]
+                stop_sent_at = time.monotonic()
+                await socket.send(json.dumps({"type": "stop"}))
+                try:
+                    await asyncio.wait_for(reader_task, timeout=timeout_seconds)
+                except TimeoutError:
+                    raise TimeoutError("stream completion timed out")
+                if reader_error:
+                    raise reader_error[0]
+            finally:
+                if not reader_task.done():
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
             if result.completed:
                 speaker_metrics = aggregate_final_speaker_events(
                     speaker_final_events, audio_started_at=audio_started_at
@@ -248,7 +321,11 @@ async def run_live_session(
                 for key, value in speaker_metrics.items():
                     setattr(result, key, value)
     except Exception as exc:
-        result.error = f"{type(exc).__name__}: {exc}"
+        _remember_websocket_close(result, exc)
+        if result.server_error_code:
+            result.error = _server_error_text(result)
+        else:
+            result.error = f"{type(exc).__name__}: {exc}"
     return result
 
 

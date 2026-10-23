@@ -120,6 +120,137 @@ def test_fake_websocket_counts_final_segments_revisions_changes_and_label_latenc
     assert result.final_text == "甲乙"
 
 
+def test_live_server_error_event_is_preserved_with_close_code_and_partial_frame_metrics(monkeypatch):
+    class FakeClosed(Exception):
+        def __init__(self, code, reason):
+            self.code = code
+            self.reason = reason
+            super().__init__(f"closed {code}: {reason}")
+
+    class FakeSocket:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+            self.queue.put_nowait(json.dumps({"type":"start_ack","session_id":"overloaded"}))
+            self.sent_audio = 0
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+        async def send(self, message):
+            if isinstance(message, bytes):
+                self.sent_audio += 1
+                if self.sent_audio == 1:
+                    self.queue.put_nowait(json.dumps({"type":"error","code":"queue_full","message":"capacity exceeded"}))
+                    self.queue.put_nowait(FakeClosed(1013, "try again later"))
+                    await asyncio.sleep(0)
+                else:
+                    raise FakeClosed(1013, "try again later")
+
+        async def recv(self):
+            item = await self.queue.get()
+            if isinstance(item, BaseException): raise item
+            return item
+
+    fake = FakeSocket()
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda *_args, **_kwargs: fake))
+    result = asyncio.run(run_live_session(
+        pcm=bytes(640 * 5), endpoint="ws://fake", run_id="overloaded-live", frame_ms=20,
+        hotword_set_id=None, speaker_scope=None, token=None, timeout_seconds=1,
+    ))
+
+    assert result.completed is False
+    assert result.server_error_code == "queue_full"
+    assert result.server_error_message == "capacity exceeded"
+    assert result.websocket_close_code == 1013
+    assert result.websocket_close_reason == "try again later"
+    assert result.error == "server_error:queue_full"
+    assert result.frames_sent == 1
+    assert result.max_client_backlog_seconds is not None
+
+
+def test_live_send_close_drains_queued_server_error_before_reader_cancel(monkeypatch):
+    class FakeClosed(Exception):
+        code = 1013
+        reason = "capacity"
+
+    class FakeSocket:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+            self.queue.put_nowait(json.dumps({"type":"start_ack"}))
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+        async def send(self, message):
+            if isinstance(message, bytes):
+                # Queue both frames and throw without an await/yield. The reader
+                # has not had a scheduling turn when this send exception occurs.
+                self.queue.put_nowait(json.dumps({"type":"error","code":"capacity_exceeded","message":"queue full"}))
+                self.queue.put_nowait(FakeClosed())
+                raise FakeClosed()
+
+        async def recv(self):
+            item = await self.queue.get()
+            if isinstance(item, BaseException): raise item
+            return item
+
+    fake = FakeSocket()
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda *_args, **_kwargs: fake))
+    result = asyncio.run(run_live_session(
+        pcm=bytes(640 * 3), endpoint="ws://fake", run_id="racing-error", frame_ms=20,
+        hotword_set_id=None, speaker_scope=None, token=None, timeout_seconds=1,
+    ))
+
+    assert result.server_error_code == "capacity_exceeded"
+    assert result.server_error_message == "queue full"
+    assert result.websocket_close_code == 1013
+    assert result.error == "server_error:capacity_exceeded"
+    assert result.frames_sent == 0
+    assert result.max_client_backlog_seconds is None
+
+
+def test_live_close_without_server_event_keeps_actual_partial_frame_count(monkeypatch):
+    class FakeClosed(Exception):
+        code = 1013
+        reason = "busy"
+
+    class FakeSocket:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+            self.queue.put_nowait(json.dumps({"type":"start_ack"}))
+            self.sent_audio = 0
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+        async def send(self, message):
+            if isinstance(message, bytes):
+                self.sent_audio += 1
+                if self.sent_audio == 1:
+                    self.queue.put_nowait(FakeClosed("1013"))
+                    await asyncio.sleep(0)
+                else:
+                    raise FakeClosed("1013")
+
+        async def recv(self):
+            item = await self.queue.get()
+            if isinstance(item, BaseException): raise item
+            return item
+
+    fake = FakeSocket()
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda *_args, **_kwargs: fake))
+    result = asyncio.run(run_live_session(
+        pcm=bytes(640 * 4), endpoint="ws://fake", run_id="closed-live", frame_ms=20,
+        hotword_set_id=None, speaker_scope=None, token=None, timeout_seconds=1,
+    ))
+
+    assert result.frames_sent == 1
+    assert result.server_error_code == ""
+    assert result.websocket_close_code == 1013
+    assert "1013" in result.error
+    assert result.max_client_backlog_seconds is not None
+
+
 def test_pcm_pacing_tracks_audio_timeline_and_client_backlog():
     class FakeClock:
         now = 0.0
@@ -174,6 +305,26 @@ def test_summary_counts_errors_and_computes_latency_percentiles():
     assert summary["server_drop_telemetry_coverage"] == {"reported": 0, "sessions": 2}
     assert summary["latency_seconds"]["first_partial"]["p50"] == pytest.approx(0.15)
     assert summary["latency_seconds"]["final_text"]["p50"] == pytest.approx(0.3)
+
+
+def test_structured_live_diagnostics_are_summarized_and_reported_additively(tmp_path):
+    item = SessionResult(
+        "overload", "realtime", error="server_error:capacity_exceeded",
+        server_error_code="capacity_exceeded", server_error_message="worker queue is full",
+        websocket_close_code=1013, websocket_close_reason="try again later", frames_sent=4,
+        max_client_backlog_seconds=0.02,
+    )
+    summary = summarize([item])
+    assert summary["error_counts"] == {"server_error": 1}
+    assert summary["server_error_counts"] == {"capacity_exceeded": 1}
+    assert summary["websocket_close_code_counts"] == {"1013": 1}
+    report_json, report_csv = write_report(tmp_path, config={"thresholds": {}}, results=[item], resource_samples=[])
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    session = report["sessions"][0]
+    assert session["server_error_code"] == "capacity_exceeded"
+    assert session["websocket_close_code"] == 1013
+    csv_text = report_csv.read_text(encoding="utf-8-sig")
+    assert "server_error_code" in csv_text and "websocket_close_code" in csv_text
 
 
 def test_gate_fails_on_error_rate_and_marks_unreported_drops_unknown():
