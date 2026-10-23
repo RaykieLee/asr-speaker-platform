@@ -1,10 +1,11 @@
-import { authorizationHeaders, formatTime, hotwordEntriesToText, hotwordId,
-  groupCorrectionTargets, mergeHotwordEntries, normalizeJobForDisplay, resampleTo16k,
+import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, formatTime, hotwordComparisonPlan, hotwordId,
+  groupCorrectionTargets, normalizeHotwordEntry, normalizeJobForDisplay, parseHotwordImport, resampleTo16k,
   speakerCorrectionPayload, streamStartMessage, toS16LE } from './logic.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = { hotwords: [], speakers: [], selectedSpeaker: null, selectedHotword: null,
-  live: null, liveSegments: new Map(), job: null, jobData: null, poll: null };
+  live: null, liveSegments: new Map(), job: null, jobData: null, poll: null,
+  hotwordDraftEntries: [], importPreview: null };
 const views = {
   live: ['实时识别', 'VOICE CAPTURE / 01', '让每段对话，都有迹可循。', '实时查看识别结果与说话人状态，录音会直接送往你配置的本地服务。'],
   files: ['文件转写', 'FILE TRANSCRIPTION / 02', '把音频整理成可检索的文字。', '上传文件后，任务会在本地识别服务中排队处理。'],
@@ -22,6 +23,7 @@ async function request(path, options = {}) {
     const detail = body?.detail;
     const error = new Error(typeof detail === 'string' ? detail : detail?.message || body?.message || `${response.status} ${response.statusText}`);
     error.quality = detail?.quality;
+    error.code = detail?.code || body?.code || body?.type || null;
     throw error;
   }
   return body;
@@ -60,31 +62,73 @@ function selectOptions(select, selected = '') {
 }
 async function loadHotwords() {
   try {
-    const result = await request('/api/v1/hotword-sets?status=active');
+    const result = await request('/api/v1/hotword-sets?status=all');
     state.hotwords = Array.isArray(result) ? result : result.items || [];
     $('hotword-count').textContent = state.hotwords.length;
-    $('hotword-list').innerHTML = state.hotwords.length ? state.hotwords.map(item => { const id=hotwordId(item); return `<button class="library-row ${hotwordId(state.selectedHotword) === id ? 'chosen' : ''}" data-hotword="${escapeHtml(id)}"><span class="library-glyph">✳</span><span><strong>${escapeHtml(item.name)}</strong><small>${(item.entries || []).length} 个词条 · v${item.current_version || item.version || 1}</small></span><b>→</b></button>`; }).join('') : '<div class="empty-state compact"><strong>还没有热词方案</strong><p>创建后可在实时和文件识别中选用。</p></div>';
+    $('hotword-list').innerHTML = state.hotwords.length ? state.hotwords.map(item => { const id=hotwordId(item); return `<button class="library-row ${hotwordId(state.selectedHotword) === id ? 'chosen' : ''}" data-hotword="${escapeHtml(id)}"><span class="library-glyph">✳</span><span><strong>${escapeHtml(item.name)}</strong><small>${(item.entries || []).length} 个词条 · v${item.current_version || item.version || 1} · ${item.status === 'inactive' ? '已停用' : '启用中'}</small></span><b>→</b></button>`; }).join('') : '<div class="empty-state compact"><strong>还没有热词方案</strong><p>创建后可在实时和文件识别中选用。</p></div>';
     state.hotwords.forEach(item => $('hotword-list').querySelector(`[data-hotword="${CSS.escape(hotwordId(item))}"]`)?.addEventListener('click', () => editHotword(item)));
     selectOptions($('live-hotword')); selectOptions($('file-hotword'));
   } catch (error) { toast(`读取热词失败：${error.message}`, 'error'); }
 }
 function editHotword(item) {
   state.selectedHotword = item; $('hotword-editor-empty').classList.add('hidden'); $('hotword-editor-form').classList.remove('hidden');
-  $('hotword-name').value = item.name; $('hotword-entries').value = hotwordEntriesToText(item.entries || []);
+  state.importPreview = null; $('hotword-import-preview').classList.add('hidden'); $('apply-hotword-import').disabled = true;
+  state.hotwordDraftEntries = (item.entries || []).map(normalizeHotwordEntry).filter(Boolean);
+  renderHotwordEntries(); $('hotword-name').value = item.name;
   $('hotword-weight').value = item.weight ?? 1; $('weight-value').textContent = $('hotword-weight').value;
   $('hotword-version').textContent = `版本 ${item.current_version || item.version || 1}`; $('hotword-editor-title').textContent = item.name;
-  $('save-hotword').textContent = '保存新版本'; $('deactivate-hotword').classList.remove('hidden');
+  $('save-hotword').textContent = '保存新版本'; $('deactivate-hotword').classList.toggle('hidden', item.status === 'inactive');
+  $('hotword-stale').classList.add('hidden'); clearError($('hotword-error')); clearError($('hotword-import-error'));
+  setHotwordReadOnly(item.status === 'inactive');
   document.querySelectorAll('[data-hotword]').forEach(n => n.classList.toggle('chosen', n.dataset.hotword === hotwordId(item)));
 }
 function newHotword() {
   state.selectedHotword = null; $('hotword-editor-empty').classList.add('hidden'); $('hotword-editor-form').classList.remove('hidden');
-  $('hotword-name').value = ''; $('hotword-entries').value = ''; $('hotword-weight').value = 1;
+  state.importPreview = null; $('hotword-import-preview').classList.add('hidden'); $('apply-hotword-import').disabled = true;
+  state.hotwordDraftEntries = []; renderHotwordEntries(); $('hotword-name').value = ''; $('hotword-weight').value = 1;
   $('weight-value').textContent = '1'; $('hotword-version').textContent = '新方案'; $('hotword-editor-title').textContent = '新建方案';
   $('save-hotword').textContent = '创建方案'; $('deactivate-hotword').classList.add('hidden');
+  $('hotword-stale').classList.add('hidden'); clearError($('hotword-error')); setHotwordReadOnly(false);
+}
+function setHotwordReadOnly(readOnly) {
+  $('hotword-name').disabled = readOnly; $('hotword-weight').disabled = readOnly;
+  $('add-hotword-entry').disabled = readOnly; $('preview-hotword-import').disabled = readOnly;
+  $('hotword-import-text').disabled = readOnly; $('hotword-import-format').disabled = readOnly; $('hotword-csv-file').disabled = readOnly;
+  $('apply-hotword-import').disabled = readOnly || !state.importPreview?.added.length;
+  $('save-hotword').disabled = readOnly;
+}
+function renderHotwordEntries() {
+  $('hotword-entry-count').textContent = state.hotwordDraftEntries.length;
+  $('hotword-entry-list').innerHTML = state.hotwordDraftEntries.map((entry, index) => `<div class="hotword-entry" data-entry-index="${index}"><label>热词<input data-entry-field="word" value="${escapeHtml(entry.word)}" maxlength="256" placeholder="必填词或短语"></label><label>可选别名<input data-entry-field="aliases" value="${escapeHtml(entry.aliases.join(' | '))}" placeholder="别名 A | 别名 B"></label><label>语言<input data-entry-field="language" value="${escapeHtml(entry.language)}" placeholder="自动"></label><label class="entry-enabled"><input data-entry-field="enabled" type="checkbox" ${entry.enabled ? 'checked' : ''}>启用</label><button type="button" class="row-delete" data-entry-remove aria-label="删除热词">×</button></div>`).join('') || '<div class="empty-import">尚无词条。可手动添加，或从下方批量导入。</div>';
+  $('hotword-entry-list').querySelectorAll('[data-entry-field]').forEach(input => input.disabled = state.selectedHotword?.status === 'inactive');
+  $('hotword-entry-list').querySelectorAll('[data-entry-remove]').forEach(button => button.disabled = state.selectedHotword?.status === 'inactive');
+}
+function previewHotwordImport() {
+  clearError($('hotword-import-error'));
+  try {
+    const parsed = parseHotwordImport($('hotword-import-text').value, $('hotword-import-format').value);
+    state.importPreview = dedupeHotwordEntries(parsed, state.hotwordDraftEntries);
+    const preview = $('hotword-import-preview'); preview.classList.remove('hidden');
+    const words = state.importPreview.added.slice(0, 12).map(item => escapeHtml(item.word)).join('、');
+    preview.innerHTML = `<strong>新增 ${state.importPreview.added.length} 条，去重 ${state.importPreview.duplicates.length} 条</strong><span>${words || '没有可添加的新词'}${state.importPreview.added.length > 12 ? '…' : ''}</span>${state.importPreview.duplicates.length ? `<small>重复项：${state.importPreview.duplicates.slice(0,8).map(escapeHtml).join('、')}${state.importPreview.duplicates.length > 8 ? '…' : ''}</small>` : ''}`;
+    $('apply-hotword-import').disabled = !state.importPreview.added.length || state.selectedHotword?.status === 'inactive';
+  } catch (error) { state.importPreview = null; $('apply-hotword-import').disabled = true; showError($('hotword-import-error'), error); }
+}
+function applyHotwordImport() {
+  if (!state.importPreview) return;
+  state.hotwordDraftEntries = state.importPreview.entries; renderHotwordEntries();
+  $('hotword-import-text').value = ''; $('hotword-import-preview').classList.add('hidden'); $('apply-hotword-import').disabled = true;
+  state.importPreview = null;
+}
+function reloadSelectedHotword() {
+  const id = hotwordId(state.selectedHotword);
+  const latest = state.hotwords.find(item => hotwordId(item) === id);
+  if (latest) editHotword(latest);
 }
 async function saveHotword() {
   clearError($('hotword-error'));
-  const entries = mergeHotwordEntries($('hotword-entries').value, state.selectedHotword?.entries || []);
+  const entries = state.hotwordDraftEntries.map(entry => ({...entry, aliases:[...entry.aliases]}));
+  if (entries.some(entry => !entry.word.trim())) { showError($('hotword-error'), new Error('请填写每条热词的词或短语。')); return; }
   const payload = { name: $('hotword-name').value.trim(), entries, weight: Number($('hotword-weight').value) };
   try {
     const editing = state.selectedHotword;
@@ -95,7 +139,11 @@ async function saveHotword() {
     const id = hotwordId(saved) || hotwordId(editing);
     const updated = state.hotwords.find(x=>hotwordId(x)===id) || state.hotwords.find(x=>x.name===payload.name);
     if(updated) editHotword(updated);
-  } catch (error) { showError($('hotword-error'), error); }
+  } catch (error) {
+    if (error.code === 'HOTWORD_VERSION_CONFLICT') $('hotword-stale').classList.remove('hidden');
+    showError($('hotword-error'), error.code === 'HOTWORD_VERSION_CONFLICT'
+      ? new Error('服务器上的方案版本已更新。你的草稿仍保留；确认后可重新载入最新版本。') : error);
+  }
 }
 async function deactivateHotword() {
   if (!state.selectedHotword) return;
@@ -197,7 +245,7 @@ function renderJob(job) {
   if (job.status === 'failed') { $('upload-error').textContent = job.error_message || '任务失败'; $('upload-error').classList.remove('hidden'); }
   else clearError($('upload-error'));
   $('result-speaker-status').textContent = `说话人处理：${display.speakerDiarization}`;
-  if (job.status === 'succeeded') renderSpeakerCorrections(job, segments);
+  if (job.status === 'succeeded' && !state.comparisonRunning) renderSpeakerCorrections(job, segments);
   else { $('speaker-corrections').classList.add('hidden'); $('speaker-corrections').innerHTML = ''; }
 }
 
@@ -238,15 +286,79 @@ async function saveSpeakerCorrection(job, localId, card) {
   } catch(error) { showError(errorNode,error); }
   finally { if (button.isConnected) { button.disabled=false; button.textContent='保存纠错'; } }
 }
+async function runFileJob(file, hotwordSetId, label) {
+  const data = new FormData(); data.append('file', file); data.append('language', $('file-language').value);
+  data.append('channel_mode', $('file-channel-mode').value);
+  if (hotwordSetId) data.append('hotword_set_id', hotwordSetId);
+  const created = await request('/api/v1/transcriptions', {method:'POST', body:data});
+  if (label === 'with') state.job = created;
+  $('job-id-copy').textContent = `${label === 'off' ? '关闭热词' : label === 'with' ? '启用热词' : '任务'} · ${created.job_id}`;
+  while (true) {
+    const job = await request(created.status_url);
+    if (label !== 'off' && label !== 'with') renderJob(job);
+    else {
+      $('job-state').textContent = `${label === 'off' ? '关闭热词' : '启用热词'}：${job.status}`;
+      $('job-percent').textContent = `${Math.round((job.progress || 0) * 100)}%`;
+      $('job-progress-bar').style.width = `${Math.max(4, (job.progress || 0) * 100)}%`;
+      $('result-summary').classList.remove('hidden'); $('result-status').textContent = job.status;
+      $('result-model').textContent = job.model_version || job.result_metadata?.model_version || '模型版本未知';
+      $('result-duration').textContent = normalizeJobForDisplay(job).duration != null ? formatTime(normalizeJobForDisplay(job).duration) : '—';
+    }
+    if (!['queued', 'running', 'pending'].includes(job.status)) return {...job, ...created, ...job, status_url: created.status_url};
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+}
+function showComparison(withoutHotwords, withHotwords) {
+  const result = compareHotwordTranscripts(withoutHotwords, withHotwords);
+  const hotwordVersion = withHotwords?.hotword_set_version ?? withHotwords?.hotword_version;
+  $('hotword-comparison').classList.remove('hidden');
+  $('comparison-label').textContent = result.comparisonLabel;
+  $('comparison-off-id').textContent = `状态：${result.without.status} · 任务：${result.without.jobId || '未创建'}`;
+  $('comparison-on-id').textContent = `状态：${result.with.status} · 任务：${result.with.jobId || '未创建'} · 热词版本：${hotwordVersion ?? '服务未返回'}`;
+  $('comparison-off-text').textContent = result.without.text || (result.without.status === 'succeeded' ? '服务未返回文字' : '该任务没有可展示的转写文字');
+  $('comparison-on-text').textContent = result.with.text || (result.with.status === 'succeeded' ? '服务未返回文字' : '该任务没有可展示的转写文字');
+  $('comparison-verdict').textContent = result.without.status !== 'succeeded' || result.with.status !== 'succeeded'
+    ? '至少一个任务未成功，以上仅展示实际收到的状态和文字。'
+    : result.sameTranscript ? '两次任务返回的原始文字相同。' : '两次任务返回的原始文字不同；仅为文本差异，不代表准确率或热词收益。';
+  return result;
+}
 async function submitFile() {
   const file = $('audio-file').files[0]; if (!file) return;
+  const compare = $('compare-hotwords').checked;
+  const selectedId = $('file-hotword').value;
+  if (compare && !selectedId) { showError($('upload-error'), new Error('请先选择热词方案，再运行同录音开 / 关对比。')); return; }
   clearError($('upload-error')); $('upload-progress').classList.remove('hidden'); $('job-state').textContent = '正在上传'; $('job-id-copy').textContent = '';
-  const data = new FormData(); data.append('file', file); data.append('language', $('file-language').value); data.append('channel_mode',$('file-channel-mode').value); if($('file-hotword').value) data.append('hotword_set_id',$('file-hotword').value);
+  $('upload-file').disabled = true;
+  if (compare) {
+    state.comparisonRunning = true;
+    $('hotword-comparison').classList.remove('hidden');
+    $('comparison-label').textContent = '正在创建真实转写任务…';
+    $('comparison-off-text').textContent = '排队中'; $('comparison-on-text').textContent = '等待第一项任务完成';
+    $('file-results').innerHTML = '<div class="empty-state compact"><strong>同录音对比正在运行</strong><p>两项任务将顺序提交同一个文件。</p></div>';
+    $('speaker-corrections').classList.add('hidden'); $('result-footer').classList.add('hidden');
+  }
   try {
-    const created = await request('/api/v1/transcriptions', {method:'POST', body:data}); state.job = created; $('job-id-copy').textContent = `任务 ${created.job_id}`;
-    const poll = async () => { const job = await request(created.status_url); renderJob(job); if(['queued','running','pending'].includes(job.status)) state.poll = setTimeout(poll,1200); };
-    await poll();
+    if (!compare) {
+      const job = await runFileJob(file, selectedId, 'single');
+      state.jobData = job;
+      if (job.status === 'failed') showError($('upload-error'), new Error(job.error_message || '转写任务失败'));
+      return;
+    }
+    let without = null, withWords = null;
+    const [offPlan, onPlan] = hotwordComparisonPlan(selectedId);
+    try { without = await runFileJob(file, offPlan.hotwordSetId, 'off'); }
+    catch (error) { without = {status:'request_failed', error_message:error.message}; }
+    $('comparison-off-id').textContent = `状态：${without.status} · 任务：${without.job_id || '未创建'}`;
+    $('comparison-off-text').textContent = normalizeJobForDisplay(without).segments.map(segment=>segment.text || '').join('\n') || normalizeJobForDisplay(without).text || (without.error_message || '无转写文字');
+    $('comparison-on-text').textContent = '正在运行启用热词的真实任务…';
+    try { withWords = await runFileJob(file, onPlan.hotwordSetId, 'with'); }
+    catch (error) { withWords = {status:'request_failed', error_message:error.message}; }
+    state.jobData = withWords;
+    showComparison(without, withWords);
+    if (withWords.status === 'succeeded') renderJob(withWords);
+    else showError($('upload-error'), new Error(withWords.error_message || `启用热词的任务状态：${withWords.status}`));
   } catch(error) { showError($('upload-error'), error); $('job-state').textContent = '任务未能启动'; }
+  finally { state.comparisonRunning = false; $('upload-file').disabled = false; }
 }
 function bind() {
   document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click',()=>activateView(b.dataset.view)));
@@ -263,6 +375,33 @@ function bind() {
   $('dropzone').addEventListener('dragover',e=>{e.preventDefault();$('dropzone').classList.add('dragging');}); $('dropzone').addEventListener('dragleave',()=> $('dropzone').classList.remove('dragging'));
   $('dropzone').addEventListener('drop',e=>{e.preventDefault();$('dropzone').classList.remove('dragging');if(e.dataTransfer.files[0]){$('audio-file').files=e.dataTransfer.files;$('audio-file').dispatchEvent(new Event('change'));}});
   $('upload-file').addEventListener('click',submitFile); $('copy-result').addEventListener('click',()=>navigator.clipboard?.writeText(normalizeJobForDisplay(state.jobData || {}).segments.map(s=>s.text).join('\n') || normalizeJobForDisplay(state.jobData || {}).text).then(()=>toast('已复制转写文本')));
+  $('hotword-entry-list').addEventListener('input', event => {
+    const field = event.target.dataset.entryField; if (!field) return;
+    const index = Number(event.target.closest('[data-entry-index]')?.dataset.entryIndex);
+    const entry = state.hotwordDraftEntries[index]; if (!entry) return;
+    if (field === 'word') entry.word = event.target.value;
+    if (field === 'aliases') entry.aliases = event.target.value.split(/[;|]/).map(value => value.trim()).filter(Boolean);
+    if (field === 'language') entry.language = event.target.value;
+    if (field === 'enabled') entry.enabled = event.target.checked;
+  });
+  $('hotword-entry-list').addEventListener('change', event => {
+    if (event.target.dataset.entryField !== 'enabled') return;
+    const index = Number(event.target.closest('[data-entry-index]')?.dataset.entryIndex);
+    if (state.hotwordDraftEntries[index]) state.hotwordDraftEntries[index].enabled = event.target.checked;
+  });
+  $('hotword-entry-list').addEventListener('click', event => {
+    if (!event.target.closest('[data-entry-remove]')) return;
+    const index = Number(event.target.closest('[data-entry-index]')?.dataset.entryIndex);
+    state.hotwordDraftEntries.splice(index, 1); renderHotwordEntries();
+  });
+  $('add-hotword-entry').addEventListener('click', () => { state.hotwordDraftEntries.push({word:'',aliases:[],language:'',enabled:true}); renderHotwordEntries(); $('hotword-entry-list').lastElementChild?.querySelector('[data-entry-field="word"]')?.focus(); });
+  $('preview-hotword-import').addEventListener('click',previewHotwordImport);
+  $('apply-hotword-import').addEventListener('click',applyHotwordImport);
+  $('hotword-import-format').addEventListener('change',()=>{state.importPreview=null;$('hotword-import-preview').classList.add('hidden');$('apply-hotword-import').disabled=true;});
+  $('hotword-csv-file').addEventListener('change',async event=>{const file=event.target.files?.[0];if(!file)return;try{$('hotword-import-format').value='csv';$('hotword-import-text').value=await file.text();previewHotwordImport();}catch(error){showError($('hotword-import-error'),error);}finally{event.target.value='';}});
+  $('hotword-import-text').addEventListener('input',()=>{state.importPreview=null;$('hotword-import-preview').classList.add('hidden');$('apply-hotword-import').disabled=true;});
+  $('reload-hotword-version').addEventListener('click',async()=>{const id=hotwordId(state.selectedHotword);await loadHotwords();const latest=state.hotwords.find(item=>hotwordId(item)===id);if(latest)editHotword(latest);});
+  $('compare-hotwords').addEventListener('change',event=>{if(!event.target.checked)$('hotword-comparison').classList.add('hidden');});
   document.querySelectorAll('[data-export-format]').forEach(button=>button.addEventListener('click',()=>downloadExport(button.dataset.exportFormat)));
   $('new-speaker-button').addEventListener('click',createSpeaker); $('refresh-speakers').addEventListener('click',loadSpeakers);
   $('speaker-audio').addEventListener('change',e=>{$('speaker-file-name').textContent=e.target.files[0]?.name||'选择语音样本';$('upload-speaker-sample').disabled=!e.target.files[0];});

@@ -47,15 +47,119 @@ export function hotwordEntriesToText(entries = []) {
 }
 
 export function mergeHotwordEntries(text, previous = []) {
-  const prior = new Map(previous.map(entry => {
-    const word = typeof entry === 'string' ? entry : entry?.word || entry?.phrase;
-    return [String(word || '').trim().toLocaleLowerCase(), entry];
-  }));
-  return text.split(/\r?\n/).map(word => word.trim()).filter(Boolean).map(word => {
-    const old = prior.get(word.toLocaleLowerCase());
-    if (!old || typeof old === 'string') return word;
-    return { ...old, word };
+  const prior = new Map(previous.map(normalizeHotwordEntry).filter(Boolean)
+    .map(entry => [entry.word.toLocaleLowerCase(), entry]));
+  return text.split(/\r?\n/).map(word => word.trim()).filter(Boolean).map(word =>
+    prior.get(word.toLocaleLowerCase()) || normalizeHotwordEntry(word));
+}
+
+export function normalizeHotwordEntry(raw = {}) {
+  if (typeof raw === 'string') raw = { word: raw };
+  const word = String(raw?.word ?? raw?.phrase ?? '').trim();
+  if (!word) return null;
+  return {
+    word,
+    aliases: Array.isArray(raw.aliases) ? raw.aliases.map(x => String(x).trim()).filter(Boolean) : [],
+    language: String(raw.language ?? raw.lang ?? '').trim(),
+    enabled: raw.enabled !== false,
+  };
+}
+
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [], cell = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (quoted) {
+      if (char === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (char === '"') quoted = false;
+      else cell += char;
+    } else if (char === '"') quoted = true;
+    else if (char === ',') { row.push(cell); cell = ''; }
+    else if (char === '\n' || char === '\r') {
+      if (char === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); if (row.some(value => value.trim())) rows.push(row);
+      row = []; cell = '';
+    } else cell += char;
+  }
+  if (quoted) throw new Error('CSV 含有未闭合的双引号');
+  row.push(cell); if (row.some(value => value.trim())) rows.push(row);
+  return rows;
+}
+
+export function parseHotwordImport(text, format = 'paste') {
+  if (format === 'paste') {
+    return text.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(word => normalizeHotwordEntry(word));
+  }
+  if (format !== 'csv') throw new Error('不支持的导入格式');
+  const rows = parseCsvRows(text);
+  if (!rows.length) return [];
+  const canonical = value => value.trim().toLowerCase().replace(/[ _-]/g, '');
+  const first = rows[0].map(canonical);
+  const hasHeader = first.some(name => ['word', 'phrase', 'hotword'].includes(name));
+  const headers = hasHeader ? first : ['word', 'aliases', 'language', 'enabled'];
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  return dataRows.map((cells, index) => {
+    const record = Object.fromEntries(headers.map((header, i) => [header, cells[i] || '']));
+    const word = String(record.word || record.phrase || record.hotword || '').trim();
+    if (!word) throw new Error(`CSV 第 ${index + (hasHeader ? 2 : 1)} 行缺少 word`);
+    const rawEnabled = String(record.enabled ?? '').trim().toLowerCase();
+    if (rawEnabled && !['true', 'false', '1', '0', 'yes', 'no', '启用', '停用'].includes(rawEnabled)) {
+      throw new Error(`CSV 第 ${index + (hasHeader ? 2 : 1)} 行 enabled 只能填写 true/false`);
+    }
+    const enabled = !['false', '0', 'no', '停用'].includes(rawEnabled);
+    return normalizeHotwordEntry({
+      word,
+      aliases: String(record.aliases || record.alias || '').split('|').map(value => value.trim()).filter(Boolean),
+      language: record.language || record.lang || '',
+      enabled,
+    });
   });
+}
+
+export function dedupeHotwordEntries(entries = [], existing = []) {
+  const result = existing.map(normalizeHotwordEntry).filter(Boolean);
+  const seen = new Set();
+  for (const entry of result) for (const phrase of [entry.word, ...entry.aliases]) seen.add(phrase.toLocaleLowerCase());
+  const duplicates = [];
+  const added = [];
+  for (const raw of entries) {
+    const entry = normalizeHotwordEntry(raw);
+    if (!entry) continue;
+    const key = entry.word.toLocaleLowerCase();
+    if (seen.has(key)) { duplicates.push(entry.word); continue; }
+    seen.add(key);
+    entry.aliases = entry.aliases.filter(alias => {
+      const aliasKey = alias.toLocaleLowerCase();
+      if (seen.has(aliasKey)) { duplicates.push(alias); return false; }
+      seen.add(aliasKey); return true;
+    });
+    result.push(entry); added.push(entry);
+  }
+  return { entries: result, added, duplicates };
+}
+
+export function compareHotwordTranscripts(withoutHotwords, withHotwords) {
+  const rawText = job => {
+    const normalized = normalizeJobForDisplay(job || {});
+    return normalized.segments.map(segment => segment.text || '').join('\n') || normalized.text || '';
+  };
+  const baseline = rawText(withoutHotwords);
+  const boosted = rawText(withHotwords);
+  return {
+    sameTranscript: baseline === boosted,
+    without: { jobId: withoutHotwords?.job_id || withoutHotwords?.id || null, status: withoutHotwords?.status || 'missing', text: baseline },
+    with: { jobId: withHotwords?.job_id || withHotwords?.id || null, status: withHotwords?.status || 'missing', text: boosted },
+    comparisonLabel: '原始转写差异；未使用人工真值计算命中率或收益',
+  };
+}
+
+export function hotwordComparisonPlan(hotwordSetId) {
+  if (!hotwordSetId) throw new Error('先选择热词方案，再运行开关对比');
+  return [
+    { mode: 'off', hotwordSetId: null },
+    { mode: 'on', hotwordSetId },
+  ];
 }
 
 export function normalizeJobForDisplay(job = {}) {

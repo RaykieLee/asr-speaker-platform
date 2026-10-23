@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { authorizationHeaders, formatTime, hotwordEntriesToText, hotwordId,
-  groupCorrectionTargets, mergeHotwordEntries, normalizeJobForDisplay, percentile,
+import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, formatTime, hotwordEntriesToText, hotwordId,
+  groupCorrectionTargets, hotwordComparisonPlan, mergeHotwordEntries, normalizeJobForDisplay, parseHotwordImport, percentile,
   resampleTo16k, speakerCorrectionPayload, streamStartMessage, toS16LE } from './public/logic.mjs';
 
 test('percentile uses nearest-rank and handles empty input', () => {
@@ -24,8 +24,39 @@ test('hotword list supports database id and object entries without losing metada
   assert.equal(hotwordId({id:'hw_1'}), 'hw_1');
   assert.equal(hotwordEntriesToText(entries), 'Ada\n李子熙');
   assert.deepEqual(mergeHotwordEntries('Ada\n新词', entries), [
-    {word:'Ada', aliases:['A.'], language:'en', enabled:true}, '新词',
+    {word:'Ada', aliases:['A.'], language:'en', enabled:true}, {word:'新词',aliases:[],language:'',enabled:true},
   ]);
+});
+
+test('hotword import parses aliases, language and enabled CSV values and deduplicates preview', () => {
+  const imported = parseHotwordImport('word,aliases,language,enabled\n"云端工作台","云端|云台",zh,true\nAda,,en,false', 'csv');
+  assert.deepEqual(imported, [
+    {word:'云端工作台',aliases:['云端','云台'],language:'zh',enabled:true},
+    {word:'Ada',aliases:[],language:'en',enabled:false},
+  ]);
+  const preview = dedupeHotwordEntries(imported, [{word:'云端工作台', aliases:['云端'], language:'zh', enabled:true}]);
+  assert.deepEqual(preview.added, [{word:'Ada',aliases:[],language:'en',enabled:false}]);
+  assert.deepEqual(preview.duplicates, ['云端工作台']);
+});
+
+test('plain bulk paste is one enabled term per line and rejects malformed CSV quoting', () => {
+  assert.deepEqual(parseHotwordImport('甲\n 乙 \n\n丙', 'paste').map(item=>item.word), ['甲','乙','丙']);
+  assert.throws(() => parseHotwordImport('word,aliases\n"unfinished', 'csv'), /未闭合/);
+});
+
+test('hotword comparison exposes raw task transcripts without claiming quality gain', () => {
+  const result = compareHotwordTranscripts(
+    {job_id:'job-off',status:'succeeded',segments:[{text:'云端工作台'}]},
+    {job_id:'job-on',status:'succeeded',segments:[{text:'云端工作台'}]},
+  );
+  assert.equal(result.sameTranscript, true);
+  assert.equal(result.without.jobId, 'job-off');
+  assert.equal(result.with.text, '云端工作台');
+  assert.match(result.comparisonLabel, /未使用人工真值/);
+  assert.deepEqual(hotwordComparisonPlan('set-1'), [
+    {mode:'off',hotwordSetId:null}, {mode:'on',hotwordSetId:'set-1'},
+  ]);
+  assert.throws(() => hotwordComparisonPlan(''), /先选择热词方案/);
 });
 
 test('job display uses effective segments and authoritative metadata', () => {
