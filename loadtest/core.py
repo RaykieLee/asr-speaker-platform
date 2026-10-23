@@ -52,6 +52,7 @@ async def pace_pcm(
     sample_width: int = SAMPLE_WIDTH,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    on_progress: Callable[[int, float, int], None] | None = None,
 ) -> dict[str, float | int]:
     """Send PCM frames against a wall-clock audio timeline and expose client backlog."""
     frame_bytes = pcm_frame_bytes(frame_ms, sample_rate, sample_width)
@@ -75,6 +76,8 @@ async def pace_pcm(
         max_lag = max(max_lag, lag)
         if lag >= frame_seconds:
             late_frames += 1
+        if on_progress is not None:
+            on_progress(sent, max_lag, late_frames)
     elapsed = max(0.0, clock() - started)
     duration = len(pcm) / (sample_rate * sample_width)
     return {
@@ -98,6 +101,10 @@ class SessionResult:
     server_dropped_frames: int | None = None
     max_client_backlog_seconds: float | None = None
     client_late_frames: int = 0
+    server_error_code: str = ""
+    server_error_message: str = ""
+    websocket_close_code: int | None = None
+    websocket_close_reason: str = ""
     first_partial_seconds: float | None = None
     final_text_seconds: float | None = None
     completion_after_stop_seconds: float | None = None
@@ -354,10 +361,18 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
     partial_values = [item.first_partial_seconds for item in results if item.first_partial_seconds is not None]
     speaker_values = [item.speaker_seconds for item in results if item.speaker_seconds is not None]
     errors: dict[str, int] = {}
+    server_errors: dict[str, int] = {}
+    websocket_closes: dict[str, int] = {}
     for item in results:
         if item.error:
             key = item.error.split(":", 1)[0] or "unknown"
             errors[key] = errors.get(key, 0) + 1
+        if item.server_error_code:
+            code = item.server_error_code
+            server_errors[code] = server_errors.get(code, 0) + 1
+        if item.websocket_close_code is not None:
+            code = str(item.websocket_close_code)
+            websocket_closes[code] = websocket_closes.get(code, 0) + 1
     succeeded = sum(item.completed and not item.error for item in results)
     audio_seconds = sum(item.audio_seconds for item in results)
     file_results = [item for item in results if item.mode == "file"]
@@ -397,6 +412,8 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
         "success_count": succeeded,
         "error_count": sum(errors.values()),
         "error_counts": errors,
+        "server_error_counts": server_errors,
+        "websocket_close_code_counts": websocket_closes,
         "success_rate": succeeded / len(results) if results else None,
         "audio_seconds": audio_seconds,
         "file_audio_seconds": file_audio_seconds,
@@ -478,7 +495,8 @@ def write_report(
         "run_id", "mode", "session_id", "started_at", "audio_seconds", "frames_sent", "server_dropped_frames",
         "max_client_backlog_seconds", "client_late_frames", "first_partial_seconds", "final_text_seconds",
         "completion_after_stop_seconds",
-        "speaker_seconds", "concurrency_tier", "final_segment_count", "final_speaker_labeled_segment_count",
+        "speaker_seconds", "server_error_code", "server_error_message", "websocket_close_code",
+        "websocket_close_reason", "concurrency_tier", "final_segment_count", "final_speaker_labeled_segment_count",
         "speaker_change_count", "speaker_label_latency_sample_count", "speaker_label_latency_p50_seconds",
         "speaker_label_latency_p95_seconds", "speaker_label_latency_p99_seconds",
         "final_text", "speaker", "error", "completed", "job_id", "queue_seconds",
