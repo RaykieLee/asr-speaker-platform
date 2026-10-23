@@ -84,6 +84,37 @@ def test_missing_speaker_labels_are_not_counted_as_errors_and_missing_change_is_
     assert boundary["status"] == "not_evaluable_no_output_boundaries"
 
 
+def test_reference_overlap_is_excluded_and_reported_not_scored_as_single_speaker():
+    annotation = {"segments": [
+        {"start": 0, "end": 1, "text": "A", "lang": "en", "speaker_id": "A", "registered_identity": "reg-a"},
+        {"start": 0.5, "end": 1.5, "text": "B", "lang": "en", "speaker_id": "B", "registered_identity": "reg-b"},
+    ]}
+    output = {"segments": [
+        {"start": 0, "end": 1, "text": "A", "local_speaker_id": "a", "registered_speaker_id": "reg-a"},
+        {"start": 0.5, "end": 1.5, "text": "B", "local_speaker_id": "b", "registered_speaker_id": "reg-b"},
+    ]}
+    metrics = evaluate(annotation, output)["metrics"]
+    assert metrics["der_like"]["value"] == 0
+    assert metrics["der_like"]["reference_speech_seconds"] == 1
+    assert metrics["der_like"]["excluded_overlap_seconds"] == pytest.approx(0.5)
+    assert metrics["registered_hit_rate"]["registered_reference_seconds"] == 1
+    assert metrics["boundary_error_seconds"]["value"] is None
+    assert metrics["boundary_error_seconds"]["status"] == "not_evaluable_reference_overlap"
+
+
+def test_unequal_speaker_cardinality_matches_best_overlapping_output_id():
+    annotation = {"segments": [
+        {"start": 0, "end": 10, "text": "x", "lang": "en", "speaker_id": "A", "registered_identity": None},
+    ]}
+    output = {"segments": [
+        {"start": 0, "end": 2, "text": "x", "local_speaker_id": "a"},
+        {"start": 2, "end": 10, "text": "x", "local_speaker_id": "z"},
+    ]}
+    metrics = evaluate(annotation, output)["metrics"]
+    assert metrics["der_like"]["error_seconds"] == 2
+    assert metrics["der_like"]["value"] == pytest.approx(0.2)
+
+
 def test_cli_writes_report_without_copying_transcript_text(tmp_path):
     annotation, output = fixture_data()
     a, o, report = tmp_path / "annotation.json", tmp_path / "output.json", tmp_path / "report.json"

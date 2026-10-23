@@ -70,6 +70,59 @@ def _rate(errors: int, total: int) -> dict[str, Any]:
             "status": "evaluated" if total else "not_evaluable_empty_reference"}
 
 
+def _maximum_overlap_mapping(refs: list[str], hyps: list[str],
+                             overlap: dict[tuple[str, str], float]) -> dict[str, str]:
+    """Maximum-weight one-to-one matching, allowing unmatched IDs on the larger side."""
+    if not refs or not hyps:
+        return {}
+    # Hungarian algorithm for n rows <= m columns. Put the smaller identity set
+    # on rows so every row is paired and excess IDs on the larger side stay unmatched.
+    rows_are_refs = len(refs) <= len(hyps)
+    rows, cols = (refs, hyps) if rows_are_refs else (hyps, refs)
+    n, m = len(rows), len(cols)
+    u, v = [0.0] * (n + 1), [0.0] * (m + 1)
+    p, way = [0] * (m + 1), [0] * (m + 1)
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [float("inf")] * (m + 1)
+        used = [False] * (m + 1)
+        while True:
+            used[j0] = True
+            i0, delta, j1 = p[j0], float("inf"), 0
+            for j in range(1, m + 1):
+                if used[j]:
+                    continue
+                r, h = (rows[i0 - 1], cols[j - 1]) if rows_are_refs else (cols[j - 1], rows[i0 - 1])
+                current = -overlap[(r, h)] - u[i0] - v[j]
+                if current < minv[j]:
+                    minv[j], way[j] = current, j0
+                if minv[j] < delta:
+                    delta, j1 = minv[j], j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+    mapping: dict[str, str] = {}
+    for j in range(1, m + 1):
+        if p[j]:
+            row_id, col_id = rows[p[j] - 1], cols[j - 1]
+            hyp_id, ref_id = (col_id, row_id) if rows_are_refs else (row_id, col_id)
+            mapping[hyp_id] = ref_id
+    return mapping
+
+
 def _transcript_metrics(ref: list[dict[str, Any]], hyp: list[dict[str, Any]] | None) -> dict[str, Any]:
     if hyp is None:
         return {"cer": {"value": None, "status": "not_evaluable_missing_output"},
@@ -106,8 +159,7 @@ def _speaker_metrics(ref: list[dict[str, Any]], hyp: list[dict[str, Any]] | None
         return {"der_like": unavailable, "registered_hit_rate": unavailable,
                 "unknown_false_attribution_rate": unavailable, "boundary_error_seconds": unavailable}
 
-    # Match arbitrary output-local IDs to human IDs by maximum overlap. For small speaker sets,
-    # enumerate permutations to avoid treating local numbering as identity.
+    # Match arbitrary output-local IDs to human IDs by maximum overlap.
     refs = sorted({str(s.get("speaker_id")) for s in ref})
     hyps = sorted({str(s.get("speaker_id")) for s in hyp})
     overlap: dict[tuple[str, str], float] = {(a, b): 0.0 for a in refs for b in hyps}
@@ -115,26 +167,19 @@ def _speaker_metrics(ref: list[dict[str, Any]], hyp: list[dict[str, Any]] | None
         for h in hyp:
             d = max(0.0, min(r["_end"], h["_end"]) - max(r["_start"], h["_start"]))
             overlap[(str(r["speaker_id"]), str(h["speaker_id"]))] += d
-    mapping: dict[str, str] = {}
-    if len(refs) <= 8 and len(hyps) <= 8:
-        import itertools
-        best = (-1.0, ())
-        for perm in itertools.permutations(refs, min(len(refs), len(hyps))):
-            score = sum(overlap[(a, b)] for a, b in zip(perm, hyps))
-            if score > best[0]:
-                best = score, perm
-        mapping = {h: r for h, r in zip(hyps, best[1])}
-    else:
-        for h in hyps:
-            mapping[h] = max(refs, key=lambda r: overlap[(r, h)])
+    mapping = _maximum_overlap_mapping(refs, hyps, overlap)
 
     points = sorted({x for s in ref + hyp for x in (s["_start"], s["_end"])})
-    total = errors = reg_total = reg_hit = unknown_total = unknown_false = 0.0
+    total = errors = reg_total = reg_hit = unknown_total = unknown_false = excluded_overlap = 0.0
     for left, right in zip(points, points[1:]):
         if right <= left:
             continue
         mid, duration = (left + right) / 2, right - left
-        r = next((s for s in ref if s["_start"] <= mid < s["_end"]), None)
+        active_ref = [s for s in ref if s["_start"] <= mid < s["_end"]]
+        if len(active_ref) > 1:
+            excluded_overlap += duration
+            continue
+        r = active_ref[0] if active_ref else None
         h = next((s for s in hyp if s["_start"] <= mid < s["_end"]), None)
         if r is None:
             continue
@@ -162,24 +207,33 @@ def _speaker_metrics(ref: list[dict[str, Any]], hyp: list[dict[str, Any]] | None
             nearest = min(remaining, key=lambda value: abs(value - boundary_time))
             paired_errors.append(abs(nearest - boundary_time))
             remaining.remove(nearest)
-    boundary = sum(paired_errors) / len(paired_errors) if paired_errors else None
+    boundary = (sum(paired_errors) / len(paired_errors)
+                if paired_errors and not excluded_overlap else None)
     return {
         "der_like": {"value": errors / total if total else None, "error_seconds": errors,
-                     "reference_speech_seconds": total, "status": "evaluated" if total else "not_evaluable_empty_reference"},
+                     "reference_speech_seconds": total, "excluded_overlap_seconds": excluded_overlap,
+                     "scoring_scope": "reference overlap intervals excluded",
+                     "status": "evaluated" if total else
+                              ("not_evaluable_only_overlapping_reference_speech" if excluded_overlap else
+                               "not_evaluable_empty_reference")},
         "registered_hit_rate": {"value": reg_hit / reg_total if reg_total else None,
                                  "matched_seconds": reg_hit, "registered_reference_seconds": reg_total,
+                                 "excluded_overlap_seconds": excluded_overlap,
                                  "status": "evaluated" if reg_total else "not_evaluable_no_registered_speech"},
         "unknown_false_attribution_rate": {"value": unknown_false / unknown_total if unknown_total else None,
                                            "false_attributed_seconds": unknown_false, "unknown_reference_seconds": unknown_total,
+                                           "excluded_overlap_seconds": excluded_overlap,
                                            "status": "evaluated" if unknown_total else "not_evaluable_no_unknown_speech"},
         "boundary_error_seconds": {"value": boundary, "reference_boundaries": len(ref_boundaries),
                                    "hypothesis_boundaries": len(hyp_boundaries),
                                    "matched_boundaries": len(paired_errors),
                                    "missed_reference_boundaries": len(ref_boundaries) - len(paired_errors),
                                    "extra_hypothesis_boundaries": len(remaining),
-                                   "status": "evaluated" if paired_errors else
+                                   "excluded_overlap_seconds": excluded_overlap,
+                                   "status": "not_evaluable_reference_overlap" if excluded_overlap else
+                                            ("evaluated" if paired_errors else
                                             ("not_evaluable_no_output_boundaries" if ref_boundaries else
-                                             "not_evaluable_no_reference_boundaries")},
+                                             "not_evaluable_no_reference_boundaries"))},
     }
 
 
