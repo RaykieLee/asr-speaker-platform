@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, formatTime, hotwordEntriesToText, hotwordId,
+import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, fileTranscriptionSettings, formatTime, hotwordEntriesToText, hotwordId,
   groupCorrectionTargets, hotwordComparisonPlan, mergeHotwordEntries, normalizeJobForDisplay, parseHotwordImport, percentile,
-  resampleTo16k, speakerCorrectionPayload, streamStartMessage, toS16LE } from './public/logic.mjs';
+  resampleTo16k, serializeHotwordEntries, speakerCorrectionPayload, streamStartMessage, toS16LE, trackTranscriptionJob } from './public/logic.mjs';
 
 test('percentile uses nearest-rank and handles empty input', () => {
   assert.equal(percentile([10, 1, 3, 2], 0.5), 2);
@@ -24,7 +24,7 @@ test('hotword list supports database id and object entries without losing metada
   assert.equal(hotwordId({id:'hw_1'}), 'hw_1');
   assert.equal(hotwordEntriesToText(entries), 'Ada\n李子熙');
   assert.deepEqual(mergeHotwordEntries('Ada\n新词', entries), [
-    {word:'Ada', aliases:['A.'], language:'en', enabled:true}, {word:'新词',aliases:[],language:'',enabled:true},
+    {word:'Ada', aliases:['A.'], language:'en', enabled:true}, {word:'新词',aliases:[],language:null,enabled:true},
   ]);
 });
 
@@ -33,6 +33,17 @@ test('hotword import parses aliases, language and enabled CSV values and dedupli
   assert.deepEqual(imported, [
     {word:'云端工作台',aliases:['云端','云台'],language:'zh',enabled:true},
     {word:'Ada',aliases:[],language:'en',enabled:false},
+  ]);
+  assert.deepEqual(parseHotwordImport('词\n英文词', 'paste').map(entry=>entry.language), [null, null]);
+  assert.equal(parseHotwordImport('word,aliases\n词,', 'csv')[0].language, null);
+  assert.deepEqual(serializeHotwordEntries([
+    {word:'旧词',aliases:[],language:'',enabled:true},
+    {word:'自动词',aliases:[],language:'auto',enabled:true},
+    {word:'标注词',aliases:['别名'],language:'zh',enabled:false},
+  ]), [
+    {word:'旧词',aliases:[],language:null,enabled:true},
+    {word:'自动词',aliases:[],language:null,enabled:true},
+    {word:'标注词',aliases:['别名'],language:'zh',enabled:false},
   ]);
   const preview = dedupeHotwordEntries(imported, [{word:'云端工作台', aliases:['云端'], language:'zh', enabled:true}]);
   assert.deepEqual(preview.added, [{word:'Ada',aliases:[],language:'en',enabled:false}]);
@@ -57,6 +68,17 @@ test('hotword comparison exposes raw task transcripts without claiming quality g
     {mode:'off',hotwordSetId:null}, {mode:'on',hotwordSetId:'set-1'},
   ]);
   assert.throws(() => hotwordComparisonPlan(''), /先选择热词方案/);
+});
+
+test('file job settings are captured once and created jobs remain available to export and correction actions', () => {
+  const settings = fileTranscriptionSettings('zh','separate');
+  assert.deepEqual(settings,{language:'zh',channelMode:'separate'});
+  assert.equal(Object.isFrozen(settings),true);
+  const state = {job:null};
+  const created = {job_id:'job-123',status_url:'/api/v1/transcriptions/job-123'};
+  assert.equal(trackTranscriptionJob(state,created),created);
+  assert.equal(state.job.job_id,'job-123');
+  assert.equal(state.job.status_url,'/api/v1/transcriptions/job-123');
 });
 
 test('job display uses effective segments and authoritative metadata', () => {

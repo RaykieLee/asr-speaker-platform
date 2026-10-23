@@ -57,12 +57,33 @@ export function normalizeHotwordEntry(raw = {}) {
   if (typeof raw === 'string') raw = { word: raw };
   const word = String(raw?.word ?? raw?.phrase ?? '').trim();
   if (!word) return null;
+  const rawLanguage = String(raw.language ?? raw.lang ?? '').trim();
+  const language = rawLanguage && !['auto', '自动'].includes(rawLanguage.toLocaleLowerCase()) ? rawLanguage : null;
   return {
     word,
     aliases: Array.isArray(raw.aliases) ? raw.aliases.map(x => String(x).trim()).filter(Boolean) : [],
-    language: String(raw.language ?? raw.lang ?? '').trim(),
+    language,
     enabled: raw.enabled !== false,
   };
+}
+
+export function serializeHotwordEntries(entries = []) {
+  return entries.map(normalizeHotwordEntry).filter(Boolean).map(entry => ({
+    ...entry,
+    language: entry.language || null,
+  }));
+}
+
+export function fileTranscriptionSettings(language, channelMode) {
+  return Object.freeze({
+    language: String(language || 'auto'),
+    channelMode: String(channelMode || 'mixdown'),
+  });
+}
+
+export function trackTranscriptionJob(state, createdJob) {
+  state.job = createdJob;
+  return createdJob;
 }
 
 function parseCsvRows(text) {

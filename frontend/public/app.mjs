@@ -1,6 +1,7 @@
 import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, formatTime, hotwordComparisonPlan, hotwordId,
-  groupCorrectionTargets, normalizeHotwordEntry, normalizeJobForDisplay, parseHotwordImport, resampleTo16k,
-  speakerCorrectionPayload, streamStartMessage, toS16LE } from './logic.mjs';
+  fileTranscriptionSettings, groupCorrectionTargets, normalizeHotwordEntry, normalizeJobForDisplay, parseHotwordImport,
+  resampleTo16k, serializeHotwordEntries, speakerCorrectionPayload, streamStartMessage, toS16LE,
+  trackTranscriptionJob } from './logic.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = { hotwords: [], speakers: [], selectedSpeaker: null, selectedHotword: null,
@@ -99,7 +100,7 @@ function setHotwordReadOnly(readOnly) {
 }
 function renderHotwordEntries() {
   $('hotword-entry-count').textContent = state.hotwordDraftEntries.length;
-  $('hotword-entry-list').innerHTML = state.hotwordDraftEntries.map((entry, index) => `<div class="hotword-entry" data-entry-index="${index}"><label>热词<input data-entry-field="word" value="${escapeHtml(entry.word)}" maxlength="256" placeholder="必填词或短语"></label><label>可选别名<input data-entry-field="aliases" value="${escapeHtml(entry.aliases.join(' | '))}" placeholder="别名 A | 别名 B"></label><label>语言<input data-entry-field="language" value="${escapeHtml(entry.language)}" placeholder="自动"></label><label class="entry-enabled"><input data-entry-field="enabled" type="checkbox" ${entry.enabled ? 'checked' : ''}>启用</label><button type="button" class="row-delete" data-entry-remove aria-label="删除热词">×</button></div>`).join('') || '<div class="empty-import">尚无词条。可手动添加，或从下方批量导入。</div>';
+  $('hotword-entry-list').innerHTML = state.hotwordDraftEntries.map((entry, index) => `<div class="hotword-entry" data-entry-index="${index}"><label>热词<input data-entry-field="word" value="${escapeHtml(entry.word)}" maxlength="256" placeholder="必填词或短语"></label><label>可选别名<input data-entry-field="aliases" value="${escapeHtml(entry.aliases.join(' | '))}" placeholder="别名 A | 别名 B"></label><label>语言<input data-entry-field="language" value="${escapeHtml(entry.language || '')}" placeholder="自动"></label><label class="entry-enabled"><input data-entry-field="enabled" type="checkbox" ${entry.enabled ? 'checked' : ''}>启用</label><button type="button" class="row-delete" data-entry-remove aria-label="删除热词">×</button></div>`).join('') || '<div class="empty-import">尚无词条。可手动添加，或从下方批量导入。</div>';
   $('hotword-entry-list').querySelectorAll('[data-entry-field]').forEach(input => input.disabled = state.selectedHotword?.status === 'inactive');
   $('hotword-entry-list').querySelectorAll('[data-entry-remove]').forEach(button => button.disabled = state.selectedHotword?.status === 'inactive');
 }
@@ -129,7 +130,7 @@ async function saveHotword() {
   clearError($('hotword-error'));
   const entries = state.hotwordDraftEntries.map(entry => ({...entry, aliases:[...entry.aliases]}));
   if (entries.some(entry => !entry.word.trim())) { showError($('hotword-error'), new Error('请填写每条热词的词或短语。')); return; }
-  const payload = { name: $('hotword-name').value.trim(), entries, weight: Number($('hotword-weight').value) };
+  const payload = { name: $('hotword-name').value.trim(), entries: serializeHotwordEntries(entries), weight: Number($('hotword-weight').value) };
   try {
     const editing = state.selectedHotword;
     const saved = editing
@@ -286,12 +287,12 @@ async function saveSpeakerCorrection(job, localId, card) {
   } catch(error) { showError(errorNode,error); }
   finally { if (button.isConnected) { button.disabled=false; button.textContent='保存纠错'; } }
 }
-async function runFileJob(file, hotwordSetId, label) {
-  const data = new FormData(); data.append('file', file); data.append('language', $('file-language').value);
-  data.append('channel_mode', $('file-channel-mode').value);
+async function runFileJob(file, hotwordSetId, label, settings) {
+  const data = new FormData(); data.append('file', file); data.append('language', settings.language);
+  data.append('channel_mode', settings.channelMode);
   if (hotwordSetId) data.append('hotword_set_id', hotwordSetId);
   const created = await request('/api/v1/transcriptions', {method:'POST', body:data});
-  if (label === 'with') state.job = created;
+  trackTranscriptionJob(state, created);
   $('job-id-copy').textContent = `${label === 'off' ? '关闭热词' : label === 'with' ? '启用热词' : '任务'} · ${created.job_id}`;
   while (true) {
     const job = await request(created.status_url);
@@ -327,6 +328,7 @@ async function submitFile() {
   const compare = $('compare-hotwords').checked;
   const selectedId = $('file-hotword').value;
   if (compare && !selectedId) { showError($('upload-error'), new Error('请先选择热词方案，再运行同录音开 / 关对比。')); return; }
+  const settings = fileTranscriptionSettings($('file-language').value, $('file-channel-mode').value);
   clearError($('upload-error')); $('upload-progress').classList.remove('hidden'); $('job-state').textContent = '正在上传'; $('job-id-copy').textContent = '';
   $('upload-file').disabled = true;
   if (compare) {
@@ -339,19 +341,19 @@ async function submitFile() {
   }
   try {
     if (!compare) {
-      const job = await runFileJob(file, selectedId, 'single');
+      const job = await runFileJob(file, selectedId, 'single', settings);
       state.jobData = job;
       if (job.status === 'failed') showError($('upload-error'), new Error(job.error_message || '转写任务失败'));
       return;
     }
     let without = null, withWords = null;
     const [offPlan, onPlan] = hotwordComparisonPlan(selectedId);
-    try { without = await runFileJob(file, offPlan.hotwordSetId, 'off'); }
+    try { without = await runFileJob(file, offPlan.hotwordSetId, 'off', settings); }
     catch (error) { without = {status:'request_failed', error_message:error.message}; }
     $('comparison-off-id').textContent = `状态：${without.status} · 任务：${without.job_id || '未创建'}`;
     $('comparison-off-text').textContent = normalizeJobForDisplay(without).segments.map(segment=>segment.text || '').join('\n') || normalizeJobForDisplay(without).text || (without.error_message || '无转写文字');
     $('comparison-on-text').textContent = '正在运行启用热词的真实任务…';
-    try { withWords = await runFileJob(file, onPlan.hotwordSetId, 'with'); }
+    try { withWords = await runFileJob(file, onPlan.hotwordSetId, 'with', settings); }
     catch (error) { withWords = {status:'request_failed', error_message:error.message}; }
     state.jobData = withWords;
     showComparison(without, withWords);
