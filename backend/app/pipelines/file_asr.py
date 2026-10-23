@@ -346,20 +346,34 @@ class FileASRService:
         ]
         try:
             matches = matcher.match(audio, candidates)
-        except Exception:
+        except Exception as exc:
             # Speaker enrichment must not turn an already completed transcript into
             # a failed job when an optional embedding extraction fails.
-            return result
+            error_type = type(exc).__name__
+            segments = tuple(ASRSegment(
+                segment_id=segment.segment_id, start=segment.start, end=segment.end,
+                text=segment.text, local_speaker_id=segment.local_speaker_id,
+                registered_speaker_id=segment.registered_speaker_id,
+                overlap=segment.overlap, revision=segment.revision,
+                metadata={**(segment.metadata or {}),
+                          "speaker_fallback_error": error_type},
+            ) for segment in result.segments)
+            return FileASRResult(result.duration, segments, result.model_version,
+                                 result.speaker_diarization, result.speaker_mappings)
         mapping = matches.get(local_id) if isinstance(matches, dict) else None
         if not isinstance(mapping, dict):
             return result
         mapping = dict(mapping)
         clean_count = int(mapping.get("clean_sample_count") or 0)
-        if (mapping.get("match_status") != "matched"
-                or not mapping.get("registered_speaker_id")
-                or clean_count < minimum_count):
+        match_accepted = (
+            mapping.get("match_status") == "matched"
+            and bool(mapping.get("registered_speaker_id"))
+            and clean_count >= minimum_count
+        )
+        if not match_accepted:
             mapping.update(registered_speaker_id=None, match_status="unknown")
-        if not mapping.get("speaker_name"):
+            mapping["speaker_name"] = "未知说话人 1"
+        elif not mapping.get("speaker_name"):
             mapping["speaker_name"] = "未知说话人 1"
         mapping["local_speaker_id"] = local_id
         mapping["fallback_method"] = "asr_energy_windows"

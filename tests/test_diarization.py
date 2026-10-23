@@ -386,6 +386,73 @@ def test_separate_fallback_keeps_sufficient_but_ambiguous_voice_unknown():
     assert right[0].registered_speaker_id is None
 
 
+def test_separate_fallback_rejected_match_does_not_leak_registered_name():
+    class FixedRecognizer:
+        model_version = "asr-test"
+
+        def transcribe(self, samples, sample_rate, hotwords=None):
+            return "voice words" if samples[0] > 0.008 else ""
+
+    class EmptyDiarizer:
+        def segment(self, audio):
+            return []
+
+    class TooFewSamplesMatcher:
+        def match(self, audio, segments):
+            local_id = segments[0]["local_speaker_id"]
+            return {local_id: {
+                "local_speaker_id": local_id,
+                "registered_speaker_id": "speaker-b",
+                "speaker_name": "真人姓名乙",
+                "match_status": "matched",
+                "similarity": 0.99,
+                "margin": 0.5,
+                "clean_sample_count": 1,
+            }}
+
+    result = FileASRService(
+        FixedRecognizer(), diarizer=EmptyDiarizer(), speaker_matcher=TooFewSamplesMatcher(),
+    ).transcribe_audio(_stereo_levels(5.6, 0.0, 0.2), channel_mode="separate")
+
+    mapping = next(item for item in result.speaker_mappings
+                   if item["local_speaker_id"] == "channel_1:fallback_speaker_0")
+    right = [segment for segment in result.segments
+             if segment.metadata.get("channel_index") == 1]
+    assert mapping["match_status"] == "unknown"
+    assert mapping["registered_speaker_id"] is None
+    assert mapping["speaker_name"] == "未知说话人 1"
+    assert right[0].registered_speaker_id is None
+    assert right[0].metadata["speaker_name"] == "未知说话人 1"
+    assert "真人姓名乙" not in repr(result)
+
+
+def test_separate_fallback_matcher_error_is_diagnostic_but_nonfatal():
+    class FixedRecognizer:
+        model_version = "asr-test"
+
+        def transcribe(self, samples, sample_rate, hotwords=None):
+            return "voice words" if samples[0] > 0.008 else ""
+
+    class EmptyDiarizer:
+        def segment(self, audio):
+            return []
+
+    class BrokenMatcher:
+        def match(self, audio, segments):
+            raise RuntimeError("sensitive internal details")
+
+    result = FileASRService(
+        FixedRecognizer(), diarizer=EmptyDiarizer(), speaker_matcher=BrokenMatcher(),
+    ).transcribe_audio(_stereo_levels(5.6, 0.0, 0.2), channel_mode="separate")
+
+    right = [segment for segment in result.segments
+             if segment.metadata.get("channel_index") == 1]
+    assert result.text == "voice words"
+    assert right[0].text == "voice words"
+    assert right[0].metadata["speaker_fallback_error"] == "RuntimeError"
+    assert "sensitive internal details" not in repr(result)
+
+
 def test_job_persists_diarization_status_and_mapping(tmp_path):
     samples = array.array("h", [1000] * 16000)
     buffer = io.BytesIO()
