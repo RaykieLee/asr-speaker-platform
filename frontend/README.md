@@ -16,7 +16,7 @@ uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 node frontend/server.mjs
 ```
 
-打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)。代理默认转发到 `http://127.0.0.1:8000`，可通过 `ASR_BACKEND_URL` 修改；界面也可以填写其他服务地址。麦克风权限要求 localhost 或 HTTPS。
+打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)。代理默认转发到 `http://127.0.0.1:8000`，并转发 `/health` 与 `/ready`；可通过 `ASR_BACKEND_URL` 修改后端，界面也可以填写其他服务地址。麦克风权限要求 localhost 或 HTTPS。
 
 后端设置了 `ASR_API_TOKEN` 时，可在页面顶部填写同一个 token。HTTP 请求会使用 Bearer 认证，实时 WebSocket 会在首条 `start` 消息中发送 token。token 只保存在当前标签页的 session storage 中。
 
@@ -34,7 +34,7 @@ node frontend/server.mjs
 - 文件页勾选“同一录音热词开 / 关对比”并选择热词方案后，会在点击开始时捕获语言和声道设置，再把同一个音频文件和这组固定设置顺序提交为两个独立后端任务：一个不带热词方案，一个带所选方案。页面显示真实任务状态、任务 ID、热词版本和原始转写文字差异。它不会生成模拟结果，也不会把文本差异称为热词收益或命中率；没有人工标注时只能观察原始差异。对比会实际运行两次文件识别，请勿在不适合的服务负载期间启用。
 - 声纹分段需要 diarization 模型；没有模型时服务应明确返回 disabled/unavailable，不会由界面推测说话人。
 
-具体环境变量名称与模型路径以仓库根目录的部署说明和 `backend/app/main.py` 为准。服务健康不代表所有模型都已加载，首次调用会显示各功能自己的错误。
+具体环境变量名称与模型路径以仓库根目录的部署说明和 `backend/app/main.py` 为准。顶栏分别显示进程存活和 `/ready` 完整服务就绪状态；进程在线但模型未配置时会显示“模型未就绪”。
 
 ## 浏览器测试
 
@@ -42,4 +42,5 @@ node frontend/server.mjs
 
 ```sh
 node --test frontend/logic.test.mjs
+node --test frontend/server.test.mjs
 ```

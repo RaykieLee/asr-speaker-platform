@@ -20,7 +20,7 @@ function proxy(req, res) {
 
 const server = http.createServer((req,res) => {
   const pathname = new URL(req.url, 'http://localhost').pathname;
-  if (pathname.startsWith('/api/') || pathname === '/health' || pathname === '/docs' || pathname.startsWith('/docs/') || pathname === '/openapi.json' || pathname.startsWith('/redoc')) return proxy(req,res);
+  if (pathname.startsWith('/api/') || pathname === '/health' || pathname === '/ready' || pathname === '/docs' || pathname.startsWith('/docs/') || pathname === '/openapi.json' || pathname.startsWith('/redoc')) return proxy(req,res);
   const decoded = decodeURIComponent(pathname === '/' ? '/index.html' : pathname);
   const path = resolve(root, `.${decoded}`);
   if (path !== root && !path.startsWith(root + sep)) { res.writeHead(403).end('Forbidden'); return; }
