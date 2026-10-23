@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import array
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -153,6 +154,9 @@ class FileASRService:
                     channel_audio, hotwords=hotwords, channel_mode="mixdown",
                     progress=update_channel_progress,
                 )
+                if (result.speaker_diarization == "no_speech" and result.text.strip()
+                        and self.speaker_matcher is not None):
+                    result = self._fallback_match_transcribed_channel(channel_audio, result)
                 channel_results.append(result)
                 local_id_map: dict[str, str] = {}
                 for mapping in result.speaker_mappings:
@@ -314,6 +318,126 @@ class FileASRService:
         status = "completed" if self.speaker_matcher else "unmatched"
         return FileASRResult(audio.duration, tuple(output), self.model_version,
                              status, tuple(mappings[local_id] for local_id in local_ids))
+
+    def _fallback_match_transcribed_channel(self, audio: AudioBuffer,
+                                            result: FileASRResult) -> FileASRResult:
+        """Best-effort speaker match from voiced windows when diarization is empty.
+
+        ASR has already run. This fallback only examines those existing transcript
+        time ranges and never reruns recognition or changes segment text/timestamps.
+        """
+        matcher = self.speaker_matcher
+        if matcher is None:
+            return result
+        minimum_seconds = float(getattr(matcher, "min_segment_seconds", 1.0))
+        minimum_count = int(getattr(matcher, "min_segments_per_speaker", 2))
+        maximum_count = int(getattr(matcher, "max_segments_per_speaker", 5))
+        windows = self._voiced_embedding_windows(
+            audio, result.segments, min_duration=minimum_seconds,
+            minimum_count=minimum_count, maximum_count=maximum_count,
+        )
+        if len(windows) < minimum_count:
+            return result
+
+        local_id = "fallback_speaker_0"
+        candidates = [
+            {"start": start, "end": end, "local_speaker_id": local_id, "overlap": False}
+            for start, end in windows
+        ]
+        try:
+            matches = matcher.match(audio, candidates)
+        except Exception:
+            # Speaker enrichment must not turn an already completed transcript into
+            # a failed job when an optional embedding extraction fails.
+            return result
+        mapping = matches.get(local_id) if isinstance(matches, dict) else None
+        if not isinstance(mapping, dict):
+            return result
+        mapping = dict(mapping)
+        clean_count = int(mapping.get("clean_sample_count") or 0)
+        if (mapping.get("match_status") != "matched"
+                or not mapping.get("registered_speaker_id")
+                or clean_count < minimum_count):
+            mapping.update(registered_speaker_id=None, match_status="unknown")
+        if not mapping.get("speaker_name"):
+            mapping["speaker_name"] = "未知说话人 1"
+        mapping["local_speaker_id"] = local_id
+        mapping["fallback_method"] = "asr_energy_windows"
+
+        segments: list[ASRSegment] = []
+        for segment in result.segments:
+            if not segment.text.strip():
+                segments.append(segment)
+                continue
+            metadata = dict(segment.metadata or {})
+            metadata.update({
+                "speaker_name": mapping["speaker_name"],
+                "speaker_match_status": mapping["match_status"],
+                "speaker_similarity": mapping.get("similarity"),
+                "speaker_margin": mapping.get("margin"),
+                "speaker_fallback": mapping["fallback_method"],
+                "speaker_fallback_window_count": len(windows),
+            })
+            segments.append(ASRSegment(
+                segment_id=segment.segment_id, start=segment.start, end=segment.end,
+                text=segment.text, local_speaker_id=local_id,
+                registered_speaker_id=mapping.get("registered_speaker_id"),
+                overlap=segment.overlap, revision=segment.revision, metadata=metadata,
+            ))
+        status = "completed" if mapping["match_status"] == "matched" else "unmatched"
+        return FileASRResult(result.duration, tuple(segments), result.model_version,
+                             status, (mapping,))
+
+    @staticmethod
+    def _voiced_embedding_windows(audio: AudioBuffer, segments: tuple[ASRSegment, ...], *,
+                                  min_duration: float, minimum_count: int,
+                                  maximum_count: int) -> list[tuple[float, float]]:
+        """Find non-overlapping, sufficiently loud windows inside nonempty ASR ranges."""
+        if (audio.channels != 1 or audio.sample_rate <= 0 or min_duration <= 0
+                or minimum_count < 1 or maximum_count < minimum_count):
+            return []
+        frame_size = max(1, round(audio.sample_rate * 0.03))
+        min_frames = max(1, math.ceil(min_duration * audio.sample_rate))
+        max_gap_frames = round(0.15 * audio.sample_rate)
+        voiced_runs: list[tuple[int, int]] = []
+
+        for segment in segments:
+            if not segment.text.strip():
+                continue
+            lower = max(0, min(audio.frame_count, round(segment.start * audio.sample_rate)))
+            upper = max(lower, min(audio.frame_count, round(segment.end * audio.sample_rate)))
+            active: list[tuple[int, int]] = []
+            for start in range(lower, upper, frame_size):
+                end = min(upper, start + frame_size)
+                if end <= start:
+                    continue
+                samples = audio.samples[start:end]
+                rms = math.sqrt(sum(float(value) ** 2 for value in samples) / len(samples))
+                if rms >= 0.008:
+                    active.append((start, end))
+            for start, end in active:
+                if voiced_runs and start - voiced_runs[-1][1] <= max_gap_frames:
+                    voiced_runs[-1] = (voiced_runs[-1][0], end)
+                else:
+                    voiced_runs.append((start, end))
+
+        windows: list[tuple[float, float]] = []
+        for start, end in voiced_runs:
+            frame_count = end - start
+            count = min(maximum_count - len(windows), int(frame_count / min_frames + 1e-9))
+            if count <= 0:
+                continue
+            # Equal partitioning avoids a too-short tail and ensures every window
+            # meets the matcher’s duration gate; boundaries never overlap.
+            for index in range(count):
+                window_start = start + round(frame_count * index / count)
+                window_end = start + round(frame_count * (index + 1) / count)
+                if window_end - window_start >= min_frames:
+                    windows.append((window_start / audio.sample_rate,
+                                    window_end / audio.sample_rate))
+                    if len(windows) == maximum_count:
+                        return windows
+        return windows
 
     @staticmethod
     def _normalize_diarization_ranges(ranges: list[dict[str, Any]], duration: float) -> list[dict[str, Any]]:

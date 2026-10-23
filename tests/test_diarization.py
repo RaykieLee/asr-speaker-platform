@@ -199,6 +199,193 @@ def test_empty_diarization_falls_back_to_plain_transcription():
     assert result.speaker_diarization == "no_speech"
 
 
+def _stereo_levels(seconds: float, left: float, right: float) -> AudioBuffer:
+    frames = round(seconds * 16_000)
+    samples = array.array("f")
+    for _ in range(frames):
+        samples.extend((left, right))
+    return AudioBuffer(samples, 16_000, 2, 16_000, 2, seconds)
+
+
+def test_separate_empty_diarization_uses_nonoverlapping_voiced_asr_windows_for_match():
+    class ChannelRecognizer:
+        model_version = "asr-test"
+
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, samples, sample_rate, hotwords=None):
+            self.calls.append((len(samples), sample_rate, hotwords))
+            return "left transcript" if samples[0] > 0.25 else "right transcript"
+
+    class LeftOnlyDiarizer:
+        def segment(self, audio):
+            if audio.samples[0] > 0.25:
+                return [{"start": 0.0, "end": audio.duration,
+                         "local_speaker_id": "speaker_0"}]
+            return []
+
+    class RegisteredMatcher:
+        def __init__(self):
+            self.calls = []
+
+        def match(self, audio, segments):
+            local_id = segments[0]["local_speaker_id"]
+            self.calls.append((audio.samples[0], segments))
+            is_right = audio.samples[0] <= 0.25
+            return {local_id: {
+                "local_speaker_id": local_id,
+                "registered_speaker_id": "speaker-b" if is_right else "speaker-a",
+                "speaker_name": "B" if is_right else "A",
+                "match_status": "matched",
+                "similarity": 0.9,
+                "margin": 0.2,
+                "clean_sample_count": len(segments),
+            }}
+
+    recognizer, matcher = ChannelRecognizer(), RegisteredMatcher()
+    result = FileASRService(
+        recognizer, diarizer=LeftOnlyDiarizer(), speaker_matcher=matcher,
+    ).transcribe_audio(_stereo_levels(5.6, 0.3, 0.2), channel_mode="separate")
+
+    assert len(recognizer.calls) == 2  # ASR ran once per channel; fallback did not rerun it.
+    fallback_calls = [segments for _, segments in matcher.calls
+                      if segments[0]["local_speaker_id"] == "fallback_speaker_0"]
+    assert len(fallback_calls) == 1
+    windows = fallback_calls[0]
+    assert len(windows) >= 2
+    assert all(item["end"] - item["start"] >= 1.0 for item in windows)
+    assert all(left["end"] <= right["start"]
+               for left, right in zip(windows, windows[1:]))
+    assert [segment.text for segment in result.segments] == ["left transcript", "right transcript"]
+    assert [segment.local_speaker_id for segment in result.segments] == [
+        "channel_0:speaker_0", "channel_1:fallback_speaker_0",
+    ]
+    assert [segment.registered_speaker_id for segment in result.segments] == [
+        "speaker-a", "speaker-b",
+    ]
+    assert result.segments[1].metadata["speaker_fallback"] == "asr_energy_windows"
+    assert result.segments[1].metadata["channel_index"] == 1
+
+
+def test_separate_empty_diarization_does_not_match_silence_or_weak_evidence():
+    class FixedRecognizer:
+        model_version = "asr-test"
+
+        def __init__(self, text):
+            self.text = text
+
+        def transcribe(self, samples, sample_rate, hotwords=None):
+            return self.text
+
+    class EmptyDiarizer:
+        def segment(self, audio):
+            return []
+
+    class NeverMatch:
+        min_segment_seconds = 1.0
+        min_segments_per_speaker = 2
+        max_segments_per_speaker = 5
+
+        def __init__(self):
+            self.calls = 0
+
+        def match(self, audio, segments):
+            self.calls += 1
+            raise AssertionError("insufficient speech must not reach the matcher")
+
+    # Even if ASR emits text on silence, no voice window means no speaker assignment.
+    matcher = NeverMatch()
+    silent = FileASRService(FixedRecognizer("hallucinated words"), diarizer=EmptyDiarizer(),
+                            speaker_matcher=matcher).transcribe_audio(
+        _stereo_levels(3.0, 0.0, 0.0), channel_mode="separate",
+    )
+    assert silent.text == "hallucinated words hallucinated words"
+    assert all(segment.local_speaker_id is None and segment.registered_speaker_id is None
+               for segment in silent.segments)
+    assert not silent.speaker_mappings
+
+    # A single 1.5 second voice run cannot satisfy the matcher's two-window gate.
+    matcher = NeverMatch()
+    short = FileASRService(FixedRecognizer("short speech"), diarizer=EmptyDiarizer(),
+                           speaker_matcher=matcher).transcribe_audio(
+        _stereo_levels(1.5, 0.0, 0.2), channel_mode="separate",
+    )
+    assert short.text == "short speech short speech"
+    assert all(segment.local_speaker_id is None for segment in short.segments)
+    assert not short.speaker_mappings
+    assert matcher.calls == 0
+
+
+def test_separate_empty_diarization_preserves_asr_text_without_enough_voiced_windows():
+    class FixedRecognizer:
+        model_version = "asr-test"
+
+        def transcribe(self, samples, sample_rate, hotwords=None):
+            return "short but audible speech" if samples[-1] > 0.008 else ""
+
+    class EmptyDiarizer:
+        def segment(self, audio):
+            return []
+
+    class MustRemainUnknownMatcher:
+        min_segment_seconds = 1.0
+        min_segments_per_speaker = 2
+        max_segments_per_speaker = 5
+
+        def match(self, audio, segments):
+            raise AssertionError("only one clean window is not enough evidence")
+
+    result = FileASRService(
+        FixedRecognizer(), diarizer=EmptyDiarizer(), speaker_matcher=MustRemainUnknownMatcher(),
+    ).transcribe_audio(_stereo_levels(1.5, 0.0, 0.2), channel_mode="separate")
+
+    assert result.text == "short but audible speech"
+    right = [segment for segment in result.segments
+             if segment.metadata.get("channel_index") == 1]
+    assert len(right) == 1
+    assert right[0].text == "short but audible speech"
+    assert right[0].local_speaker_id is None
+    assert right[0].registered_speaker_id is None
+    assert not result.speaker_mappings
+
+
+def test_separate_fallback_keeps_sufficient_but_ambiguous_voice_unknown():
+    class FixedRecognizer:
+        model_version = "asr-test"
+
+        def transcribe(self, samples, sample_rate, hotwords=None):
+            return "voice words" if samples[0] > 0.008 else ""
+
+    class EmptyDiarizer:
+        def segment(self, audio):
+            return []
+
+    class UnknownMatcher:
+        def match(self, audio, segments):
+            local_id = segments[0]["local_speaker_id"]
+            return {local_id: {
+                "local_speaker_id": local_id, "registered_speaker_id": None,
+                "speaker_name": "未知说话人 1", "match_status": "unknown",
+                "similarity": 0.52, "margin": 0.01,
+                "clean_sample_count": len(segments),
+            }}
+
+    result = FileASRService(
+        FixedRecognizer(), diarizer=EmptyDiarizer(), speaker_matcher=UnknownMatcher(),
+    ).transcribe_audio(_stereo_levels(5.6, 0.0, 0.2), channel_mode="separate")
+
+    assert result.text == "voice words"
+    assert len(result.speaker_mappings) == 1
+    mapping = result.speaker_mappings[0]
+    assert mapping["match_status"] == "unknown"
+    assert mapping["registered_speaker_id"] is None
+    right = [segment for segment in result.segments
+             if segment.metadata.get("channel_index") == 1]
+    assert right[0].local_speaker_id == "channel_1:fallback_speaker_0"
+    assert right[0].registered_speaker_id is None
+
+
 def test_job_persists_diarization_status_and_mapping(tmp_path):
     samples = array.array("h", [1000] * 16000)
     buffer = io.BytesIO()
