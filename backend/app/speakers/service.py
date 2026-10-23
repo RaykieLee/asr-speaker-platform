@@ -1,8 +1,13 @@
 """Speaker enrollment service with explicit model and sample quality contracts."""
 from __future__ import annotations
 
+import io
 import math
+import shutil
+import subprocess
+import tempfile
 import uuid
+import wave
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +39,14 @@ class SampleQualityError(SpeakerError):
     def __init__(self, message: str, quality: dict[str, float | bool]):
         self.quality = quality
         super().__init__(message)
+
+
+class SampleUploadTooLargeError(SpeakerError):
+    """Enrollment upload exceeded the configured byte limit."""
+
+
+class SampleDurationTooLongError(SpeakerError):
+    """Enrollment audio exceeded the configured duration limit."""
 
 
 class EmbeddingExtractor(Protocol):
@@ -177,12 +190,20 @@ class SpeakerRegistrationService:
     def __init__(self, database: SQLiteStore, files: FileStore,
                  extractor: EmbeddingExtractor | None = None, *,
                  storage: StorageService | None = None,
-                 min_duration_seconds: float = 1.0):
+                 min_duration_seconds: float = 1.0,
+                 max_sample_bytes: int = 64 * 1024 * 1024,
+                 max_sample_duration_seconds: float = 120.0):
+        if isinstance(max_sample_bytes, bool) or not isinstance(max_sample_bytes, int) or max_sample_bytes < 1:
+            raise ValueError("max_sample_bytes must be positive")
+        if not math.isfinite(max_sample_duration_seconds) or max_sample_duration_seconds <= 0:
+            raise ValueError("max_sample_duration_seconds must be positive and finite")
         self.database = database
         self.files = files
         self.storage = storage or StorageService(database, files)
         self.extractor = extractor
         self.min_duration_seconds = min_duration_seconds
+        self.max_sample_bytes = max_sample_bytes
+        self.max_sample_duration_seconds = max_sample_duration_seconds
 
     def _require_model(self) -> EmbeddingExtractor:
         if self.extractor is None:
@@ -234,7 +255,6 @@ class SpeakerRegistrationService:
         try:
             if filename.lower().endswith(".wav") or data[:4] == b"RIFF":
                 return normalize_audio(decode_wav(data))
-            import tempfile
             suffix = Path(filename).suffix or ".audio"
             with tempfile.NamedTemporaryFile(suffix=suffix) as temporary:
                 temporary.write(data)
@@ -245,7 +265,54 @@ class SpeakerRegistrationService:
                 raise
             raise SampleQualityError(f"无法解码音频样本：{exc}", {}) from exc
 
+    @staticmethod
+    def _probe_upload_duration(data: bytes, filename: str) -> float:
+        """Read duration metadata before decoding all audio samples.
+
+        WAV duration is available from its header. Other supported formats use
+        ffprobe, which ships with the FFmpeg installation used by the decoder.
+        """
+        try:
+            if filename.lower().endswith(".wav") or data[:4] == b"RIFF":
+                with wave.open(io.BytesIO(data), "rb") as wav:
+                    rate = wav.getframerate()
+                    if rate < 1:
+                        raise ValueError("invalid sample rate")
+                    return wav.getnframes() / rate
+            ffprobe = shutil.which("ffprobe")
+            if not ffprobe:
+                raise SampleQualityError(
+                    "检查非 WAV 样本时长需要 ffprobe；请安装 FFmpeg 后重试", {}
+                )
+            suffix = Path(filename).suffix or ".audio"
+            with tempfile.NamedTemporaryFile(suffix=suffix) as temporary:
+                temporary.write(data)
+                temporary.flush()
+                result = subprocess.run(
+                    [ffprobe, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", temporary.name],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    timeout=15,
+                )
+            duration = float(result.stdout.decode("ascii").strip())
+            if not math.isfinite(duration) or duration < 0:
+                raise ValueError("invalid duration")
+            return duration
+        except SampleQualityError:
+            raise
+        except (wave.Error, EOFError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise SampleQualityError(f"无法预先检查音频时长：{exc}", {}) from exc
+
     def add_sample(self, speaker_id: str, filename: str, data: bytes) -> dict[str, Any]:
+        if len(data) > self.max_sample_bytes:
+            raise SampleUploadTooLargeError(
+                f"声纹样本超过 {self.max_sample_bytes} 字节限制"
+            )
+        duration = self._probe_upload_duration(data, filename)
+        if duration > self.max_sample_duration_seconds:
+            raise SampleDurationTooLongError(
+                f"声纹样本时长超过 {self.max_sample_duration_seconds:g} 秒限制"
+            )
         if self.database.get_speaker(speaker_id) is None:
             raise SpeakerNotFoundError(speaker_id)
         extractor = self._require_model()

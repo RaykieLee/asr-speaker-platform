@@ -58,6 +58,16 @@ def _asr_paths(directory: Path, *, online: bool):
     return files, vocab, bpe_model
 
 
+def _positive_integer_setting(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    if not raw.isascii() or not raw.isdigit():
+        raise EngineConfigError(f"{name} 必须是正整数")
+    value = int(raw)
+    if value < 1:
+        raise EngineConfigError(f"{name} 必须是正整数")
+    return value
+
+
 def _hotword_service(database: SQLiteStore, directory: Path, *, mode: str, bpe_model: Path) -> HotwordService:
     compiler = HotwordCompiler(
         mixed_cjk_bpe_tokenizer(bpe_model),
@@ -111,7 +121,9 @@ async def lifespan(application: FastAPI):
         application.state.database = database
         application.state.files = files
         application.state.speaker_registration_service = SpeakerRegistrationService(
-            database, files, extractor, storage=StorageService(database, files)
+            database, files, extractor, storage=StorageService(database, files),
+            max_sample_bytes=_positive_integer_setting("ASR_SPEAKER_SAMPLE_MAX_BYTES", 64 * 1024 * 1024),
+            max_sample_duration_seconds=float(os.environ.get("ASR_SPEAKER_SAMPLE_MAX_DURATION_SECONDS", "120")),
         )
 
         online_dir = os.environ.get("ASR_ONLINE_MODEL_DIR")

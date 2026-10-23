@@ -1,4 +1,5 @@
 import array
+import asyncio
 import io
 import math
 import wave
@@ -12,6 +13,7 @@ from backend.app.speakers import (
     SpeakerModel, SpeakerRegistrationService, SherpaSpeakerEmbeddingAdapter,
     assess_audio_quality, l2_normalize,
 )
+from backend.app.speakers.service import SampleDurationTooLongError, SampleUploadTooLargeError
 from backend.app.storage import FileStore, SQLiteStore
 from backend.app.main import app as production_app
 
@@ -190,4 +192,159 @@ def test_speaker_http_sample_upload_and_quality_error(tmp_path):
         assert silent.status_code == 422
         sample_id = good.json()["sample"]["id"]
         assert client.delete(f"/api/v1/speakers/{person['id']}/samples/{sample_id}").json() == {"deleted": True}
+    database.close()
+
+
+def test_speaker_sample_limits_reject_before_decode_and_embedding_and_return_413(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+
+    class CountingExtractor(TestExtractor):
+        calls = 0
+
+        def extract(self, audio):
+            self.calls += 1
+            return super().extract(audio)
+
+    database = SQLiteStore(tmp_path / "db.sqlite3")
+    database.initialize()
+    files = FileStore(tmp_path / "objects")
+    extractor = CountingExtractor()
+    service = SpeakerRegistrationService(
+        database, files, extractor, max_sample_bytes=100_000,
+        max_sample_duration_seconds=1.0,
+    )
+    def fail_decode(data, filename):
+        raise AssertionError("duration cap must run before decoding")
+
+    monkeypatch.setattr(service, "_decode_upload", fail_decode)
+    speaker = service.create_speaker("限制测试")
+
+    with pytest.raises(SampleUploadTooLargeError):
+        service.add_sample(speaker["id"], "large.wav", b"x" * 100_001)
+    with pytest.raises(SampleDurationTooLongError):
+        service.add_sample(speaker["id"], "long.wav", tone(1.25))
+    assert extractor.calls == 0
+    assert database.list_samples(speaker["id"]) == []
+
+    app = FastAPI()
+    app.state.speaker_registration_service = service
+    from backend.app.api.speakers import router
+    app.include_router(router)
+    with TestClient(app) as client:
+        too_large = client.post(
+            f"/api/v1/speakers/{speaker['id']}/samples",
+            files={"file": ("large.wav", b"x" * 100_001, "audio/wav")},
+        )
+        too_long = client.post(
+            f"/api/v1/speakers/{speaker['id']}/samples",
+            files={"file": ("long.wav", tone(1.25), "audio/wav")},
+        )
+        assert too_large.status_code == 413
+        assert too_large.json()["detail"]["code"] == "sample_too_large"
+        assert too_long.status_code == 413
+        assert too_long.json()["detail"]["code"] == "sample_too_long"
+    assert extractor.calls == 0
+    database.close()
+
+
+@pytest.mark.parametrize("content_length", [None, "1"])
+def test_speaker_request_receive_cap_precedes_multipart_spooling(
+    tmp_path, monkeypatch, content_length
+):
+    from fastapi import FastAPI, HTTPException
+    from starlette.formparsers import SpooledTemporaryFile as original_spooled
+    import starlette.formparsers as formparsers
+    from starlette.requests import Request
+    from backend.app.api.speakers import add_sample
+
+    database, _, service = setup_service(tmp_path / "unused", TestExtractor())
+    service.max_sample_bytes = 100
+    app = FastAPI()
+    app.state.speaker_registration_service = service
+
+    created_files = []
+
+    def track_spooled_file(*args, **kwargs):
+        file_obj = original_spooled(*args, **kwargs)
+        created_files.append(file_obj)
+        return file_obj
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", track_spooled_file)
+    body = (
+        b"--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x.wav\"\r\n"
+        b"Content-Type: audio/wav\r\n\r\n"
+        + b"x" * (600 * 1024)
+        + b"\r\n--boundary--\r\n"
+    )
+    chunks = [body[index:index + 16 * 1024] for index in range(0, len(body), 16 * 1024)]
+    headers = [(b"content-type", b"multipart/form-data; boundary=boundary")]
+    if content_length is not None:
+        headers.append((b"content-length", content_length.encode("ascii")))
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/api/v1/speakers/s/samples",
+        "raw_path": b"/api/v1/speakers/s/samples", "query_string": b"",
+        "root_path": "", "headers": headers, "client": ("test", 1),
+        "server": ("test", 80), "app": app,
+    }
+
+    async def receive():
+        if chunks:
+            chunk = chunks.pop(0)
+            return {"type": "http.request", "body": chunk, "more_body": bool(chunks)}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(scope, receive)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(add_sample("s", request))
+    assert error.value.status_code == 413
+    assert created_files
+    assert all(file_obj.closed for file_obj in created_files)
+    database.close()
+
+
+def test_speaker_upload_form_is_closed_after_success(tmp_path):
+    from fastapi import FastAPI
+    from starlette.datastructures import FormData, UploadFile
+    from starlette.requests import Request
+    from backend.app.api.speakers import add_sample
+
+    _, _, service = setup_service(tmp_path, TestExtractor())
+    person = service.create_speaker("关闭资源测试")
+    backing_file = io.BytesIO(tone())
+    upload = UploadFile(filename="voice.wav", file=backing_file)
+    form = FormData([("file", upload)])
+    app = FastAPI()
+    app.state.speaker_registration_service = service
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/", "raw_path": b"/",
+        "query_string": b"", "root_path": "", "headers": [],
+        "client": ("test", 1), "server": ("test", 80), "app": app,
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(scope, receive)
+    request._form = form
+    result = asyncio.run(add_sample(person["id"], request))
+    assert result["sample"]["speaker_id"] == person["id"]
+    assert backing_file.closed
+
+
+def test_speaker_sample_byte_limit_requires_integer(tmp_path, monkeypatch):
+    from backend.app.main import _positive_integer_setting
+    from backend.app.engines.base import EngineConfigError
+
+    setting = "ASR_TEST_POSITIVE_INT_SETTING"
+    monkeypatch.delenv(setting, raising=False)
+    assert _positive_integer_setting(setting, 64) == 64
+    for raw in ("1.5", "0", "-1", " 1"):
+        with pytest.raises(EngineConfigError, match="正整数"):
+            monkeypatch.setenv(setting, raw)
+            _positive_integer_setting(setting, 64)
+    database, files, _ = setup_service(tmp_path, TestExtractor())
+    with pytest.raises(ValueError, match="positive"):
+        SpeakerRegistrationService(database, files, TestExtractor(), max_sample_bytes=1.5)
     database.close()
