@@ -5,14 +5,119 @@ from types import SimpleNamespace
 
 import pytest
 
-from loadtest.core import SessionResult, evaluate_gates, pace_pcm, percentile, summarize, write_report
-from loadtest.runner import load_wav, run_file_job, write_repeated_wav
+from loadtest.core import (SessionResult, aggregate_final_speaker_events, evaluate_gates,
+                           pace_pcm, percentile, summarize, write_report)
+from loadtest.runner import load_wav, run_file_job, run_live_session, write_repeated_wav
 
 
 def test_percentile_uses_linear_interpolation_and_empty_values():
     assert percentile([1, 2, 3, 4], 50) == 2.5
     assert percentile([1, 2, 3, 4], 95) == pytest.approx(3.85)
     assert percentile([], 95) is None
+
+
+def test_final_speaker_events_deduplicate_by_segment_and_revision_without_exposing_payload():
+    metrics = aggregate_final_speaker_events([
+        {"type": "segment", "status": "final", "segment_id": "1", "revision": 1,
+         "start": 0, "end": 0.5, "text": "secret transcript", "local_speaker_id": "A",
+         "_received_monotonic": 10.6},
+        {"type": "segment", "status": "corrected", "segment_id": "1", "revision": 0,
+         "start": 0, "end": 0.5, "text": "stale", "local_speaker_id": "wrong",
+         "_received_monotonic": 10.7},
+        {"type": "segment", "status": "corrected", "segment_id": "1", "revision": 2,
+         "start": 0, "end": 0.5, "text": "still secret", "local_speaker_id": "A",
+         "_received_monotonic": 10.8},
+        {"type": "segment", "status": "final", "segment_id": "2", "revision": 1,
+         "start": 0.5, "end": 1.0, "text": "private", "local_speaker_id": "B",
+         "_received_monotonic": 11.2},
+        {"type": "segment", "status": "final", "segment_id": "3", "revision": 1,
+         "start": 1.0, "end": 1.5, "text": "private", "_received_monotonic": 11.7},
+    ], audio_started_at=10.0)
+    assert metrics["final_segment_count"] == 3
+    assert metrics["final_speaker_labeled_segment_count"] == 2
+    assert metrics["speaker_change_count"] == 1
+    assert metrics["speaker_label_latency_sample_count"] == 2
+    assert metrics["speaker_label_latency_p50_seconds"] == pytest.approx(0.25)
+    assert "text" not in metrics and "speaker" not in metrics
+    empty = aggregate_final_speaker_events([], audio_started_at=10.0)
+    assert empty["final_segment_count"] is None
+    assert empty["speaker_label_latency_p95_seconds"] is None
+
+
+def test_speaker_event_metrics_are_summarized_per_concurrency_tier_and_samples_not_written(tmp_path):
+    results = [
+        SessionResult("a", "realtime", completed=True, concurrency_tier=2,
+                      final_segment_count=3, final_speaker_labeled_segment_count=2,
+                      speaker_change_count=1, speaker_label_latency_samples=[0.1, 0.2]),
+        SessionResult("b", "realtime", completed=True, concurrency_tier=2,
+                      final_segment_count=2, final_speaker_labeled_segment_count=2,
+                      speaker_change_count=1, speaker_label_latency_samples=[0.3]),
+    ]
+    report_json, _ = write_report(tmp_path, config={"thresholds": {}}, results=results,
+                                  resource_samples=[], hardware={"system": "test"})
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    tier = report["summary"]["realtime_speaker_segments_by_concurrency"]["2"]
+    assert tier["session_count"] == 2
+    assert tier["final_segment_count"] == 5
+    assert tier["speaker_labeled_segment_count"] == 4
+    assert tier["speaker_change_count"] == 2
+    assert tier["speaker_label_latency_seconds"]["p50"] == pytest.approx(0.2)
+    assert report["sessions"][0]["speaker_label_latency_sample_count"] is None
+    assert "speaker_label_latency_samples" not in report["sessions"][0]
+
+
+def test_fake_websocket_counts_final_segments_revisions_changes_and_label_latency(monkeypatch):
+    class FakeSocket:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+            self.queue.put_nowait(json.dumps({"type": "start_ack", "session_id": "fake-session"}))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send(self, message):
+            if not isinstance(message, str):
+                return
+            payload = json.loads(message)
+            if payload.get("type") == "stop":
+                for event in [
+                    {"type": "segment", "status": "final", "segment_id": 1, "revision": 1,
+                     "start": 0, "end": 0.01, "text": "舊句", "local_speaker_id": "speaker_a"},
+                    {"type": "segment", "status": "corrected", "segment_id": 1, "revision": 2,
+                     "start": 0, "end": 0.01, "text": "甲", "local_speaker_id": "speaker_a"},
+                    {"type": "segment", "status": "final", "segment_id": 2, "revision": 1,
+                     "start": 0.01, "end": 0.02, "text": "乙", "local_speaker_id": "speaker_b"},
+                    {"type": "completed", "dropped_frames": 0},
+                ]:
+                    self.queue.put_nowait(json.dumps(event))
+
+        async def recv(self):
+            return await self.queue.get()
+
+    fake_socket = FakeSocket()
+
+    def connect(_endpoint, **_kwargs):
+        return fake_socket
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=connect))
+    result = asyncio.run(run_live_session(
+        pcm=bytes(1280), endpoint="ws://fake", run_id="fake-live", frame_ms=20,
+        hotword_set_id=None, speaker_scope=None, token=None, timeout_seconds=1,
+        concurrency_tier=2,
+    ))
+    assert result.error == ""
+    assert result.completed
+    assert result.final_segment_count == 2
+    assert result.final_speaker_labeled_segment_count == 2
+    assert result.speaker_change_count == 1
+    assert result.speaker_label_latency_sample_count == 2
+    assert result.speaker_label_latency_p50_seconds is not None
+    assert result.speaker_label_latency_p95_seconds is not None
+    assert result.speaker_label_latency_p99_seconds is not None
+    assert result.final_text == "甲乙"
 
 
 def test_pcm_pacing_tracks_audio_timeline_and_client_backlog():

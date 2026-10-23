@@ -44,6 +44,8 @@ python -m loadtest.plot results/2026-10-23-realtime/report.json --output results
 
 服务端没有报告 `dropped_frames` 时，`server_dropped_frames` 保持 `null`，不按零处理。客户端 `client_late_frames` 仅表示发送端落后于音频时间线，不能代替服务端丢帧计数。没有收到 partial/speaker 时延值时，分位数按可观测样本计算；不可观测延迟不会伪造为零。分位数采用线性插值定义。`gates` 给出已设置门槛的 pass/fail/not_evaluable 状态；任何关键指标未知都会使整体状态至少为 not_evaluable。
 
+实时说话人事件按 `segment_id` 聚合，较高 `revision` 覆盖较低版本，同版本按后收到的事件处理。每会话记录最终片段数、带标签片段数、按片段开始时间排序后相邻且均有标签的片段之间的换人次数，以及最终说话人标签事件相对片段 `end` 音频时间的 P50/P95/P99 延迟。没有最终片段事件、没有完成事件或无有效时间戳时，相应统计保留为 `null`；没有可计算的延迟时分位数为 `null`。摘要按并发档位汇总，并列出实际观测到的会话数。以上指标反映事件完整性与时延，不验证说话人身份准确率，也不保存额外的逐段转写或声纹数据。
+
 客户端机器元数据包含系统版本、架构、处理器描述、逻辑 CPU、内存总量（psutil 可用时）和 Python 版本。压测目标机的信息通过 `--target-os`、`--target-cpu-model`、`--target-cpu-cores`、`--target-memory-bytes`、`--target-gpu-model`、`--target-gpu-memory-bytes` 记录；模型版本、推理线程数、Worker 数、热词数量和音频特征也有对应 CLI 参数。未提供的值保留为空，不能误认为客户端配置代表服务端配置。
 
 ## 门槛与容量结论

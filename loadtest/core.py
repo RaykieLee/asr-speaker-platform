@@ -10,7 +10,7 @@ import math
 import os
 import platform
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -110,6 +110,113 @@ class SessionResult:
     queue_seconds: float | None = None
     processing_seconds: float | None = None
     rtf: float | None = None
+    concurrency_tier: int | None = None
+    final_segment_count: int | None = None
+    final_speaker_labeled_segment_count: int | None = None
+    speaker_change_count: int | None = None
+    speaker_label_latency_sample_count: int | None = None
+    speaker_label_latency_p50_seconds: float | None = None
+    speaker_label_latency_p95_seconds: float | None = None
+    speaker_label_latency_p99_seconds: float | None = None
+    # Kept only in memory for exact tier-wide percentiles; omitted from all reports.
+    speaker_label_latency_samples: list[float] = field(default_factory=list, repr=False)
+
+
+def _valid_revision(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        revision = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return revision if revision >= 0 else None
+
+
+def _speaker_label(event: dict[str, Any]) -> str | None:
+    # A local ID is stable within the session even if a registered name is attached later.
+    for key in ("local_speaker_id", "registered_speaker_id", "speaker_name"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _revision_replaces(new_revision: int | None, old_revision: int | None,
+                       new_sequence: int, old_sequence: int) -> bool:
+    if new_revision is not None and old_revision is not None:
+        return new_revision > old_revision or (new_revision == old_revision and new_sequence >= old_sequence)
+    # For mixed/absent revision fields, use arrival order as the only common clock.
+    return new_sequence >= old_sequence
+
+
+def aggregate_final_speaker_events(
+    events: Iterable[dict[str, Any]], *, audio_started_at: float | None
+) -> dict[str, Any]:
+    """Reduce final/corrected segment events to counts and timing only.
+
+    Events must contain private `_received_monotonic` values supplied by the
+    runner. Text and speaker identities are discarded from the returned metrics.
+    Highest revision wins; arrival order breaks ties and is used when revisions
+    are absent.
+    """
+    latest: dict[str, tuple[int | None, int, dict[str, Any]]] = {}
+    for sequence, event in enumerate(events):
+        if str(event.get("type", "")).lower() != "segment" or str(event.get("status", "")).lower() not in {"final", "corrected"}:
+            continue
+        if event.get("segment_id") is None:
+            continue
+        segment_id = str(event["segment_id"])
+        revision = _valid_revision(event.get("revision"))
+        previous = latest.get(segment_id)
+        if previous is None:
+            latest[segment_id] = (revision, sequence, event)
+            continue
+        old_revision, old_sequence, _ = previous
+        if _revision_replaces(revision, old_revision, sequence, old_sequence):
+            latest[segment_id] = (revision, sequence, event)
+
+    ordered = sorted((row[2] for row in latest.values()), key=lambda event: (
+        _finite_number(event.get("start")) if _finite_number(event.get("start")) is not None else float("inf"),
+        str(event.get("segment_id")),
+    ))
+    labels = [_speaker_label(event) for event in ordered]
+    labelled_count = sum(label is not None for label in labels)
+    transitions = sum(
+        left is not None and right is not None and left != right
+        for left, right in zip(labels, labels[1:])
+    )
+    latencies: list[float] = []
+    if audio_started_at is not None and math.isfinite(audio_started_at):
+        for event in ordered:
+            if _speaker_label(event) is None:
+                continue
+            end = _finite_number(event.get("end"))
+            received = _finite_number(event.get("_received_monotonic"))
+            if end is None or received is None:
+                continue
+            latency = received - (audio_started_at + end)
+            if math.isfinite(latency) and latency >= 0:
+                latencies.append(latency)
+    return {
+        "final_segment_count": len(latest) if latest else None,
+        "final_speaker_labeled_segment_count": labelled_count if latest else None,
+        "speaker_change_count": transitions if labelled_count else None,
+        "speaker_label_latency_samples": latencies,
+        "speaker_label_latency_sample_count": len(latencies) if latest else None,
+        "speaker_label_latency_p50_seconds": percentile(latencies, 50),
+        "speaker_label_latency_p95_seconds": percentile(latencies, 95),
+        "speaker_label_latency_p99_seconds": percentile(latencies, 99),
+    }
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 class ResourceSampler:
@@ -264,6 +371,27 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
     processing_seconds = sum(item.processing_seconds for item in processing_samples if item.processing_seconds is not None)
     live_results = [item for item in results if item.mode == "realtime"]
     drop_coverage = sum(item.server_dropped_frames is not None for item in live_results)
+    speaker_by_tier: dict[str, Any] = {}
+    for tier in sorted({item.concurrency_tier for item in live_results if item.concurrency_tier is not None}):
+        tier_results = [item for item in live_results if item.concurrency_tier == tier]
+        measured = [item for item in tier_results if item.final_segment_count is not None]
+        change_measured = [item for item in measured if item.speaker_change_count is not None]
+        tier_latencies = [value for item in tier_results for value in item.speaker_label_latency_samples]
+        speaker_by_tier[str(tier)] = {
+            "session_count": len(tier_results),
+            "measured_session_count": len(measured),
+            "final_segment_count": sum(item.final_segment_count or 0 for item in measured) if measured else None,
+            "speaker_labeled_segment_count": sum(
+                item.final_speaker_labeled_segment_count or 0 for item in measured
+            ) if measured else None,
+            "speaker_change_count": sum(item.speaker_change_count or 0 for item in change_measured)
+            if change_measured else None,
+            "speaker_change_measured_session_count": len(change_measured),
+            "speaker_label_latency_sample_count": len(tier_latencies),
+            "speaker_label_latency_seconds": {
+                f"p{p}": percentile(tier_latencies, p) for p in (50, 95, 99)
+            },
+        }
     return {
         "session_count": len(results),
         "success_count": succeeded,
@@ -283,6 +411,11 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
             "completion_after_stop": {f"p{p}": percentile(completion_values, p) for p in (50, 95, 99)},
             "speaker": {f"p{p}": percentile(speaker_values, p) for p in (50, 95, 99)},
         },
+        "realtime_speaker_segments_by_concurrency": speaker_by_tier,
+        "realtime_speaker_metrics_note": (
+            "Segment counts, observed label changes and event latency measure event completeness and timing only; "
+            "they do not measure speaker identity accuracy. Missing event data remains unevaluable."
+        ),
         "client_late_frames": sum(item.client_late_frames for item in results),
         "server_dropped_frames": sum(item.server_dropped_frames or 0 for item in live_results)
         if live_results and drop_coverage == len(live_results) else None,
@@ -325,12 +458,17 @@ def write_report(
         "summary": summary,
         "gates": evaluate_gates(summary, thresholds),
         "sessions": [
-            {key: value for key, value in asdict(item).items() if key != "start_monotonic"}
+            {key: value for key, value in asdict(item).items()
+             if key not in {"start_monotonic", "speaker_label_latency_samples"}}
             for item in results
         ],
         "resource_samples": resource_samples,
         "capacity_claim": None,
         "capacity_claim_note": "This report does not infer capacity; define gates and run on the target deployment machine.",
+        "speaker_metrics_note": (
+            "Real-time final segment counts, speaker-label transitions, and label event latency describe event "
+            "completeness/timing only, not identity accuracy. No additional transcript or voice data is stored."
+        ),
     }
     json_path = output_dir / "report.json"
     csv_path = output_dir / "sessions.csv"
@@ -340,7 +478,10 @@ def write_report(
         "run_id", "mode", "session_id", "started_at", "audio_seconds", "frames_sent", "server_dropped_frames",
         "max_client_backlog_seconds", "client_late_frames", "first_partial_seconds", "final_text_seconds",
         "completion_after_stop_seconds",
-        "speaker_seconds", "final_text", "speaker", "error", "completed", "job_id", "queue_seconds",
+        "speaker_seconds", "concurrency_tier", "final_segment_count", "final_speaker_labeled_segment_count",
+        "speaker_change_count", "speaker_label_latency_sample_count", "speaker_label_latency_p50_seconds",
+        "speaker_label_latency_p95_seconds", "speaker_label_latency_p99_seconds",
+        "final_text", "speaker", "error", "completed", "job_id", "queue_seconds",
         "processing_seconds", "rtf",
     ]
     with csv_path.open("w", encoding="utf-8-sig", newline="") as stream:

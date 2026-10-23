@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .core import ResourceSampler, SAMPLE_RATE, SAMPLE_WIDTH, SessionResult, hardware_metadata, pace_pcm, sha256_file, write_report
+from .core import (ResourceSampler, SAMPLE_RATE, SAMPLE_WIDTH, SessionResult,
+                   _revision_replaces, _valid_revision, aggregate_final_speaker_events,
+                   hardware_metadata, pace_pcm, sha256_file, write_report)
 
 
 def load_wav(path: Path) -> bytes:
@@ -80,6 +82,7 @@ async def run_live_session(
     speaker_scope: str | None,
     token: str | None,
     timeout_seconds: float,
+    concurrency_tier: int | None = None,
 ) -> SessionResult:
     try:
         import websockets  # type: ignore[import-not-found]
@@ -91,6 +94,7 @@ async def run_live_session(
         started_at=datetime.now(timezone.utc).isoformat(),
         start_monotonic=time.monotonic(),
         audio_seconds=len(pcm) / (SAMPLE_RATE * SAMPLE_WIDTH),
+        concurrency_tier=concurrency_tier,
     )
     headers = {"Authorization": f"Bearer {token}"} if token else None
     try:
@@ -132,10 +136,13 @@ async def run_live_session(
             else:
                 raise TimeoutError("start acknowledgement timed out")
 
-            final_segments: dict[str, tuple[float, str]] = {}
+            final_segments: dict[str, tuple[int | None, int, float, str]] = {}
+            speaker_final_events: list[dict[str, Any]] = []
+            final_event_sequence = 0
             stop_sent_at: float | None = None
 
             def record(event: dict[str, Any]) -> None:
+                nonlocal final_event_sequence
                 received = time.monotonic() - result.start_monotonic
                 if not result.session_id and event.get("session_id"):
                     result.session_id = str(event["session_id"])
@@ -148,12 +155,19 @@ async def run_live_session(
                 if _is_type(event, "segment") and str(event.get("status", "")).lower() in {"final", "corrected"}:
                     text = str(event.get("text", ""))
                     segment_id = str(event.get("segment_id", f"anonymous-{len(final_segments)}"))
+                    sequence = final_event_sequence
+                    final_event_sequence += 1
                     try:
                         segment_start = float(event.get("start", len(final_segments)))
                     except (TypeError, ValueError):
                         segment_start = float(len(final_segments))
-                    final_segments[segment_id] = (segment_start, text)
-                    result.final_text = "".join(part for _, part in sorted(final_segments.values(), key=lambda value: value[0]))
+                    revision = _valid_revision(event.get("revision"))
+                    previous = final_segments.get(segment_id)
+                    if previous is None or _revision_replaces(revision, previous[0], sequence, previous[1]):
+                        final_segments[segment_id] = (revision, sequence, segment_start, text)
+                    result.final_text = "".join(
+                        part[3] for part in sorted(final_segments.values(), key=lambda value: value[2])
+                    )
                     if result.final_text_seconds is None:
                         result.final_text_seconds = received
                     speaker = event.get("speaker_name") or event.get("registered_speaker_id") or event.get("local_speaker_id")
@@ -161,7 +175,18 @@ async def run_live_session(
                         result.speaker = str(speaker)
                         if result.speaker_seconds is None:
                             result.speaker_seconds = received
-                if _is_type(event, "final"):
+                    # Store only timing, revision, and temporary speaker identifiers for
+                    # aggregation. Never add segment text to this side-channel.
+                    speaker_final_events.append({
+                        "type": "segment", "status": str(event.get("status", "")).lower(),
+                        "segment_id": event.get("segment_id"), "revision": event.get("revision"),
+                        "start": event.get("start"), "end": event.get("end"),
+                        "local_speaker_id": event.get("local_speaker_id"),
+                        "registered_speaker_id": event.get("registered_speaker_id"),
+                        "speaker_name": event.get("speaker_name"),
+                        "_received_monotonic": time.monotonic(),
+                    })
+                if _is_type(event, "final") and str(event.get("type", "")).lower() != "segment":
                     text = str(event.get("text", ""))
                     result.final_text = (result.final_text + text).strip() or text
                     if result.final_text_seconds is None:
@@ -201,6 +226,7 @@ async def run_live_session(
                     reader_error.append(exc)
 
             reader_task = asyncio.create_task(reader())
+            audio_started_at = time.monotonic()
             paced = await pace_pcm(pcm, socket.send, frame_ms=frame_ms)
             result.frames_sent = int(paced["frames_sent"])
             result.max_client_backlog_seconds = float(paced["max_client_backlog_seconds"])
@@ -215,6 +241,12 @@ async def run_live_session(
                 raise TimeoutError("stream completion timed out")
             if reader_error:
                 raise reader_error[0]
+            if result.completed:
+                speaker_metrics = aggregate_final_speaker_events(
+                    speaker_final_events, audio_started_at=audio_started_at
+                )
+                for key, value in speaker_metrics.items():
+                    setattr(result, key, value)
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
     return result
@@ -349,6 +381,7 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
                         speaker_scope=args.speaker_scope,
                         token=args.token,
                         timeout_seconds=args.timeout,
+                        concurrency_tier=level,
                     ))
             if args.mode == "file":
                 file_count = level
