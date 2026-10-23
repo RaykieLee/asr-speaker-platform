@@ -12,7 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.exports import build_export_payload, render_json, render_srt, render_txt
 from backend.app.jobs.service import HotwordSnapshotError, JobQueueFull, TranscriptionService, UploadTooLarge
-from backend.app.api.transcription_responses import public_correction_response, public_task_response
+from backend.app.api.transcription_responses import (
+    public_correction_response, public_export_payload, public_task_response,
+)
 
 router = APIRouter()
 
@@ -210,6 +212,8 @@ async def export_transcription(job_id: str, request: Request,
     try:
         payload = build_export_payload(job, service.database)
         renderer, media_type = renderers[format]
+        if format == "json":
+            payload = public_export_payload(payload)
         return Response(
             renderer(payload), media_type=media_type,
             headers={"Content-Disposition": f'attachment; filename="{job_id}.{format}"'},

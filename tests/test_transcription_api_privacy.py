@@ -219,6 +219,33 @@ def test_failed_task_hides_internal_exception_but_keeps_user_safe_status():
         client.close()
 
 
+def test_nested_legacy_values_are_dropped_from_get_and_json_export():
+    job = raw_job()
+    job["result_metadata"]["text"] = {"private": PRIVATE_PATH}
+    job["result_metadata"]["speaker_mappings"][0]["speaker_name"] = [PRIVATE_VALUE]
+    job["segments"][0]["metadata"]["channel_index"] = {"path": PRIVATE_PATH}
+    job["segments"][0]["metadata"]["speaker_name"] = {"secret": PRIVATE_VALUE}
+    job["segments"][0]["text"] = [PRIVATE_PATH]
+    client = make_client(FakeService(job))
+    try:
+        fetched = client.get("/api/v1/transcriptions/job-public-id")
+        exported = client.get("/api/v1/transcriptions/job-public-id/export?format=json")
+        assert fetched.status_code == exported.status_code == 200
+        for response in (fetched, exported):
+            assert PRIVATE_PATH not in response.text
+            assert PRIVATE_VALUE not in response.text
+            assert '"path"' not in response.text
+        body = fetched.json()
+        assert body["segments"][0]["metadata"] == {"speaker_match_status": "matched"}
+        assert "text" not in body["segments"][0]
+        export = exported.json()
+        assert export["segments"][0]["metadata"] == {"speaker_match_status": "matched"}
+        assert "text" not in export["segments"][0]
+        assert export["segments"][0]["speaker"]["display_name"] == "Reviewed Name"
+    finally:
+        client.close()
+
+
 def test_validation_errors_share_the_transcription_error_envelope():
     client = make_client(FakeService(raw_job()))
     try:
