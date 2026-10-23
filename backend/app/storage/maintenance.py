@@ -230,7 +230,10 @@ def create_backup(database_path: str | Path, files_root: str | Path,
 
 def restore_backup(backup_dir: str | Path, destination: str | Path) -> Path:
     """Restore a verified database/file pair into a new directory atomically."""
-    source = Path(backup_dir).expanduser().resolve()
+    requested_source = Path(backup_dir).expanduser()
+    if requested_source.is_symlink():
+        raise ValueError("backup directory must not be a symbolic link")
+    source = requested_source.resolve()
     verify_backup(source)
     requested_target = Path(destination).expanduser()
     if requested_target.is_symlink():

@@ -201,6 +201,10 @@ def test_restore_rejects_dangling_symlink_and_nested_destination(tmp_path):
         restore_backup(backup, dangling)
     with pytest.raises(ValueError, match="contain one another"):
         restore_backup(backup, backup / "files" / "recursive")
+    backup_alias = tmp_path / "backup-alias"
+    backup_alias.symlink_to(backup, target_is_directory=True)
+    with pytest.raises(ValueError, match="backup directory.*symbolic link"):
+        restore_backup(backup_alias, tmp_path / "restore-through-alias")
     database.close()
 
 
