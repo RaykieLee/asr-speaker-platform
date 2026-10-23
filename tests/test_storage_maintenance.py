@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from backend.app.storage.maintenance import (
     restore_backup,
     verify_backup,
 )
+from backend.app.storage import maintenance
 
 
 def open_store(tmp_path):
@@ -108,7 +110,7 @@ def test_cleanup_defaults_to_dry_run_then_keeps_shared_and_active_references(tmp
     database.close()
 
 
-def test_cleanup_surfaces_unsafe_path_and_rolls_back_reference(tmp_path):
+def test_cleanup_surfaces_unsafe_path_after_clearing_durable_reference(tmp_path):
     database, files = open_store(tmp_path)
     finished = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
     add_job(database, "unsafe", "../outside.wav", "succeeded", finished)
@@ -117,7 +119,7 @@ def test_cleanup_surfaces_unsafe_path_and_rolls_back_reference(tmp_path):
 
     assert result["failures"]
     assert "UnsafeStoragePath" in result["failures"][0]["error"]
-    assert database.get_job("unsafe")["file_path"] == "../outside.wav"
+    assert database.get_job("unsafe")["file_path"] is None
     database.close()
 
 
@@ -153,3 +155,69 @@ def test_backup_rejects_path_traversal_and_restore_never_overwrites(tmp_path):
         restore_backup(second_backup, target)
     assert (target / "marker").read_text(encoding="utf-8") == "keep"
     db2.close()
+
+
+def test_cleanup_refuses_internal_symlink_to_registered_sample(tmp_path):
+    database, files = open_store(tmp_path)
+    now = datetime.now(timezone.utc)
+    sample = "speakers/alice/sample.wav"
+    alias = "transcriptions/expired.wav"
+    files.write(sample, b"registered sample")
+    Path(files.root / alias).parent.mkdir(parents=True, exist_ok=True)
+    (files.root / alias).symlink_to(files.root / sample)
+    database.create_speaker("Alice", speaker_id="alice")
+    database.create_sample("alice", sample, sample_id="sample", model_version="v1", embedding=[1.0])
+    add_job(database, "expired-link", alias, "succeeded", (now - timedelta(days=31)).isoformat())
+
+    result = cleanup_expired_task_audio(database, files, dry_run=False, now=now)
+
+    assert result["failures"]
+    assert database.get_job("expired-link")["file_path"] is None
+    assert (files.root / alias).is_symlink()
+    assert files.read(sample) == b"registered sample"
+    database.close()
+
+
+def test_verify_rejects_symlink_anywhere_in_backup_tree(tmp_path):
+    database, files = open_store(tmp_path)
+    backup = tmp_path / "backup"
+    create_backup(database.path, files.root, backup)
+    (backup / "database-link.sqlite3").symlink_to(backup / "database.sqlite3")
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        verify_backup(backup)
+
+    database.close()
+
+
+def test_restore_rejects_dangling_symlink_and_nested_destination(tmp_path):
+    database, files = open_store(tmp_path)
+    backup = tmp_path / "backup"
+    create_backup(database.path, files.root, backup)
+    dangling = tmp_path / "dangling-restore-target"
+    dangling.symlink_to(tmp_path / "not-created")
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        restore_backup(backup, dangling)
+    with pytest.raises(ValueError, match="contain one another"):
+        restore_backup(backup, backup / "files" / "recursive")
+    database.close()
+
+
+def test_cleanup_commits_reference_clear_before_reporting_unlink_failure(tmp_path, monkeypatch):
+    database, files = open_store(tmp_path)
+    now = datetime.now(timezone.utc)
+    path = "transcriptions/expired.wav"
+    files.write(path, b"audio")
+    add_job(database, "expired", path, "succeeded", (now - timedelta(days=31)).isoformat())
+
+    def fail_unlink(_files, _relative):
+        raise OSError("simulated unlink failure")
+
+    monkeypatch.setattr(maintenance, "_unlink_confined", fail_unlink)
+    result = cleanup_expired_task_audio(database, files, dry_run=False, now=now)
+
+    assert database.get_job("expired")["file_path"] is None
+    assert files.read(path) == b"audio"
+    assert "simulated unlink failure" in result["failures"][0]["error"]
+    database.close()

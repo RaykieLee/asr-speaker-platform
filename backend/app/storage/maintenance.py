@@ -85,7 +85,17 @@ def _expire_snapshot_audio(connection: sqlite3.Connection, cutoff: datetime) -> 
 
 
 def _verify_backup_dir(backup_dir: Path) -> dict[str, Any]:
-    root = backup_dir.expanduser().resolve()
+    candidate_root = backup_dir.expanduser()
+    if candidate_root.is_symlink():
+        raise ValueError("backup tree must not contain symbolic links")
+    if not candidate_root.is_dir():
+        raise FileNotFoundError(f"backup directory is missing: {candidate_root}")
+    # Reject every link before resolving any child: resolving first would hide
+    # an internal link that points to another file inside the backup tree.
+    for item in candidate_root.rglob("*"):
+        if item.is_symlink():
+            raise ValueError(f"backup tree must not contain symbolic links: {item}")
+    root = candidate_root.resolve()
     manifest_path = root / MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or manifest.get("format") != BACKUP_FORMAT:
@@ -94,8 +104,6 @@ def _verify_backup_dir(backup_dir: Path) -> dict[str, Any]:
     if not isinstance(database_info, dict) or database_info.get("file") != DATABASE_FILENAME:
         raise ValueError("manifest database entry is invalid")
     database_path = _safe_relative_path(root, DATABASE_FILENAME)
-    if database_path.is_symlink():
-        raise ValueError("backup database must not be a symbolic link")
     if not database_path.is_file():
         raise FileNotFoundError(f"backup database is missing: {database_path}")
     if database_path.stat().st_size != database_info.get("size_bytes") or _sha256(database_path) != database_info.get("sha256"):
@@ -224,7 +232,12 @@ def restore_backup(backup_dir: str | Path, destination: str | Path) -> Path:
     """Restore a verified database/file pair into a new directory atomically."""
     source = Path(backup_dir).expanduser().resolve()
     verify_backup(source)
-    target = Path(destination).expanduser().resolve()
+    requested_target = Path(destination).expanduser()
+    if requested_target.is_symlink():
+        raise ValueError("restore destination must not be a symbolic link")
+    target = requested_target.resolve()
+    if target == source or target.is_relative_to(source) or source.is_relative_to(target):
+        raise ValueError("restore destination and backup tree must not contain one another")
     if target.exists():
         raise FileExistsError(f"restore destination already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -241,33 +254,67 @@ def restore_backup(backup_dir: str | Path, destination: str | Path) -> Path:
         raise
 
 
+def _unlink_confined(files: FileStore, relative: str) -> bool:
+    """Unlink a regular artifact without following any symlink component."""
+    raw = Path(relative)
+    if not relative or raw.is_absolute() or ".." in raw.parts:
+        raise UnsafeStoragePath("artifact path must be relative and cannot traverse parent directories")
+    cursor = files.root
+    for part in raw.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise UnsafeStoragePath("artifact path contains a symbolic link")
+    try:
+        cursor.relative_to(files.root)
+    except ValueError as exc:
+        raise UnsafeStoragePath("artifact path resolves outside its root") from exc
+    if not cursor.is_file():
+        if not cursor.exists():
+            return False
+        raise UnsafeStoragePath("artifact path is not a regular file")
+    cursor.unlink()
+    return True
+
+
 def _expire_one(database: SQLiteStore, files: FileStore, job_id: str,
                 cutoff: datetime) -> tuple[str, str | None]:
-    with database.transaction() as connection:
-        row = connection.execute(
+    # Hold the store's process-local lock across path clearing and unlink so
+    # public mutations through this store cannot add a reference in between.
+    with database._lock:
+        with database.transaction() as connection:
+            row = connection.execute(
             "SELECT status, finished_at, file_path FROM transcription_jobs WHERE id=?", (job_id,)
-        ).fetchone()
-        if row is None or not row[2] or str(row[0]).lower() not in _TERMINAL_STATUSES:
-            return "skipped", None
-        finished = _parse_time(row[1])
-        if finished is None or finished >= cutoff:
-            return "skipped", None
-        relative = str(row[2])
-        others = connection.execute(
+            ).fetchone()
+            if row is None or not row[2] or str(row[0]).lower() not in _TERMINAL_STATUSES:
+                return "skipped", None
+            finished = _parse_time(row[1])
+            if finished is None or finished >= cutoff:
+                return "skipped", None
+            relative = str(row[2])
+            others = connection.execute(
             """SELECT
                  (SELECT COUNT(*) FROM transcription_jobs WHERE file_path=? AND id<>?) +
                  (SELECT COUNT(*) FROM speaker_samples WHERE audio_path=?)""",
             (relative, job_id, relative),
-        ).fetchone()[0]
-        if others:
+            ).fetchone()[0]
+            if others:
+                connection.execute("UPDATE transcription_jobs SET file_path=NULL, updated_at=? WHERE id=?",
+                                   (_utc().isoformat(timespec="milliseconds"), job_id))
+                return "retained_shared", relative
             connection.execute("UPDATE transcription_jobs SET file_path=NULL, updated_at=? WHERE id=?",
                                (_utc().isoformat(timespec="milliseconds"), job_id))
-            return "retained_shared", relative
-        # Keep SQLite's write lock until unlink and pointer update both finish.
-        # If unlink raises, the transaction rolls back and the reference remains.
-        files.delete(relative)
-        connection.execute("UPDATE transcription_jobs SET file_path=NULL, updated_at=? WHERE id=?",
-                           (_utc().isoformat(timespec="milliseconds"), job_id))
+        # The durable reference is cleared before touching the filesystem. A
+        # second write transaction excludes DB writers during the final ref
+        # check and unlink; a crash can leave an orphan, never a dangling DB ref.
+        with database.transaction() as connection:
+            count = connection.execute(
+                "SELECT (SELECT COUNT(*) FROM transcription_jobs WHERE file_path=?) + "
+                "(SELECT COUNT(*) FROM speaker_samples WHERE audio_path=?)",
+                (relative, relative),
+            ).fetchone()[0]
+            if count:
+                return "retained_shared", relative
+            _unlink_confined(files, relative)
         return "deleted", relative
 
 

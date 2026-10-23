@@ -45,9 +45,9 @@ python scripts/storage_maintenance.py cleanup --data-dir data
 python scripts/storage_maintenance.py cleanup --data-dir data --retention-days 30 --apply
 ```
 
-只处理 `succeeded`、`completed`、`complete`、`failed`、`cancelled` 或 `canceled` 等终态任务，并按 `finished_at` 判断是否早于期限。未完成或没有可解析完成时间的任务不会删除。清理先在 SQLite 写事务中核对引用：共享路径仍被其他任务或 `speaker_samples.audio_path` 使用时，只清空该过期任务的 `file_path`，保留共享文件；仅当数据库中没有其他引用时才删除文件。两者都保留任务、识别结果、人工修正和转写片段。删除/安全校验失败会逐项列在 JSON 输出中，保持对应数据库引用并以非零退出码结束。
+只处理 `succeeded`、`completed`、`complete`、`failed`、`cancelled` 或 `canceled` 等终态任务，并按 `finished_at` 判断是否早于期限。未完成或没有可解析完成时间的任务不会删除。清理先提交 `file_path` 清空，再在第二个 SQLite 写事务中复核引用并删除文件；共享路径仍被其他任务或 `speaker_samples.audio_path` 使用时会保留。这样若进程在两步之间退出，只会留下可安全重试清理的孤儿文件。任务、识别结果、人工修正和转写片段都会保留。删除或安全校验失败会逐项列在 JSON 输出中，此时任务引用已清空、文件保留，并以非零退出码结束。
 
-不同进程不会共享应用内锁；SQLite 写事务会阻止清理检查期间出现并发写引用。FileStore 路径通过根目录与遍历检查，越界或符号链接逃逸路径会失败并保留数据库引用。定期备份是恢复点，单独备份期间没有跨文件系统事务；若进程在文件复制中断电，暂存目录会保留为无效临时目录，不会成为正式备份，人工确认后可清理该隐藏 `.tmp-*` 目录。
+不同进程不会共享应用内锁；SQLite 最终写事务会阻止其他数据库写入穿过文件删除前的引用复核。清理拒绝最终路径或任一父目录为符号链接的文件。定期备份是恢复点，单独备份期间没有跨文件系统事务；若进程在文件复制中断电，暂存目录会保留为无效临时目录，不会成为正式备份，人工确认后可清理该隐藏 `.tmp-*` 目录。
 
 ## 定期运行建议
 
