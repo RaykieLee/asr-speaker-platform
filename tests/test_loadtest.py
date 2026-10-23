@@ -168,6 +168,47 @@ def test_live_server_error_event_is_preserved_with_close_code_and_partial_frame_
     assert result.max_client_backlog_seconds is not None
 
 
+def test_live_send_close_drains_queued_server_error_before_reader_cancel(monkeypatch):
+    class FakeClosed(Exception):
+        code = 1013
+        reason = "capacity"
+
+    class FakeSocket:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+            self.queue.put_nowait(json.dumps({"type":"start_ack"}))
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+        async def send(self, message):
+            if isinstance(message, bytes):
+                # Queue both frames and throw without an await/yield. The reader
+                # has not had a scheduling turn when this send exception occurs.
+                self.queue.put_nowait(json.dumps({"type":"error","code":"capacity_exceeded","message":"queue full"}))
+                self.queue.put_nowait(FakeClosed())
+                raise FakeClosed()
+
+        async def recv(self):
+            item = await self.queue.get()
+            if isinstance(item, BaseException): raise item
+            return item
+
+    fake = FakeSocket()
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda *_args, **_kwargs: fake))
+    result = asyncio.run(run_live_session(
+        pcm=bytes(640 * 3), endpoint="ws://fake", run_id="racing-error", frame_ms=20,
+        hotword_set_id=None, speaker_scope=None, token=None, timeout_seconds=1,
+    ))
+
+    assert result.server_error_code == "capacity_exceeded"
+    assert result.server_error_message == "queue full"
+    assert result.websocket_close_code == 1013
+    assert result.error == "server_error:capacity_exceeded"
+    assert result.frames_sent == 0
+    assert result.max_client_backlog_seconds is None
+
+
 def test_live_close_without_server_event_keeps_actual_partial_frame_count(monkeypatch):
     class FakeClosed(Exception):
         code = 1013

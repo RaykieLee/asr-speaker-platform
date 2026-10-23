@@ -104,6 +104,16 @@ def _server_error_text(result: SessionResult) -> str:
     return f"server_error:{code}"
 
 
+async def _bounded_reader_drain(task: asyncio.Task[Any], *, timeout_seconds: float = 0.05) -> None:
+    """Let already queued diagnostics reach the reader without stalling a run."""
+    if task.done():
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+    except TimeoutError:
+        pass
+
+
 async def run_live_session(
     *,
     pcm: bytes,
@@ -270,7 +280,14 @@ async def run_live_session(
                         if reader_error:
                             raise reader_error[0]
                         raise RuntimeError(_server_error_text(result))
-                    await socket.send(frame)
+                    try:
+                        await socket.send(frame)
+                    except Exception:
+                        # A close can race the reader: send() may fail in the same
+                        # turn that the server error was queued. Drain briefly before
+                        # finally cancels the reader so structured diagnostics win.
+                        await _bounded_reader_drain(reader_task)
+                        raise
 
                 def progress(frames_sent: int, backlog: float, late_frames: int) -> None:
                     result.frames_sent = frames_sent
