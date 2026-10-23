@@ -352,10 +352,10 @@ def test_stereo_separate_upload_persists_ordered_channel_metadata_and_hotwords(t
             completed = service.worker.wait(created["job_id"], timeout=3)
             assert completed["status"] == "succeeded"
             queried = client.get(created["status_url"]).json()
-            assert queried["options"]["channel_mode"] == "separate"
-            assert queried["options"]["hotwords"] == [["李", "子", "熙"]]
-            assert queried["hotword_version"] == 1
             assert queried["result_metadata"]["channel_mode"] == "separate"
+            assert queried["hotword_set_version"] == 1
+            assert "options" not in queried
+            assert queried["hotword_version"] == 1
             assert [item["metadata"]["channel_index"] for item in queried["segments"]] == [0, 1]
             assert [item["start_seconds"] for item in queried["segments"]] == [0, 0]
             assert all(item["end_seconds"] == pytest.approx(0.5) for item in queried["segments"])
