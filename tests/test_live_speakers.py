@@ -153,6 +153,75 @@ def test_profile_matcher_rejects_embedding_dimension_mismatch():
     assert result is None
 
 
+def test_local_unknown_centroids_are_bounded_and_existing_ids_stay_stable():
+    class DistinctExtractor:
+        model_version = "fake-v1"
+
+        def __init__(self):
+            self.index = 0
+
+        def extract(self, audio):
+            vector = [0.0] * 256
+            vector[self.index] = 1.0
+            self.index += 1
+            return vector
+
+    extractor = DistinctExtractor()
+    state = LiveSpeakerTracker(
+        vad=FakeVAD(), extractor=extractor, matcher=lambda _vector, _rows: None,
+        max_local_speakers=4,
+    )
+
+    identities = [state._identify([0.1] * 8_000) for _ in range(200)]
+
+    assert len(state._local_vectors) == 4
+    assert [identity.local_speaker_id for identity in identities[:4]] == [
+        "speaker_0", "speaker_1", "speaker_2", "speaker_3",
+    ]
+    assert all(identity == SpeakerIdentity() for identity in identities[4:])
+    assert state.unknown_capacity_exhaustions == 196
+    extractor.index = 0
+    assert state._identify([0.1] * 8_000) == SpeakerIdentity(local_speaker_id="speaker_0")
+    assert len(state._local_vectors) == 4
+    assert state.unknown_capacity_exhaustions == 196
+
+
+def test_capacity_exhaustion_moves_registered_current_to_unknown():
+    class NovelExtractor:
+        model_version = "fake-v1"
+
+        def __init__(self):
+            self.index = 0
+
+        def extract(self, audio):
+            self.index += 1
+            return [0.0, 1.0] if self.index == 1 else [0.0, -1.0]
+
+    extractor = NovelExtractor()
+    state = LiveSpeakerTracker(
+        vad=FakeVAD(), extractor=extractor, matcher=lambda _vector, _rows: None,
+        profiles=(), sample_rate=16_000, window_seconds=0.25,
+        step_seconds=0.25, min_speech_seconds=0.25,
+        min_dwell_seconds=0.25, confirmations=1, max_local_speakers=1,
+    )
+    # One unknown centroid consumes the budget; the next unmatched voice must
+    # be an explicit empty identity, not None (which would retain this label).
+    assert state._identify([0.1] * 4_000) == SpeakerIdentity(local_speaker_id="speaker_0")
+    state.current = SpeakerIdentity("speaker_0", "registered_a", "甲")
+
+    changes = state.feed([0.1] * 4_000, 4_000)
+
+    assert len(changes) == 1
+    assert changes[0]["previous"]["registered_speaker_id"] == "registered_a"
+    assert changes[0]["speaker"] == {
+        "local_speaker_id": None,
+        "registered_speaker_id": None,
+        "speaker_name": None,
+    }
+    assert state.current == SpeakerIdentity()
+    assert len(state._local_vectors) == 1
+
+
 def test_confirmed_switch_finalizes_old_segment_and_starts_non_overlapping_segment():
     live = LiveASRSession(FakeRecognizer(), options=StartOptions(), speaker_tracker=tracker())
     first = live.feed((b"\xff\x7f") * 32_000)

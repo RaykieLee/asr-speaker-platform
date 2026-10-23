@@ -25,6 +25,9 @@ class SpeakerIdentity:
     speaker_name: str | None = None
 
 
+MAX_LOCAL_SPEAKER_CENTROIDS = 32
+
+
 class LiveSpeakerTracker:
     """Detect speaker changes from overlapping windows with confirmation hysteresis.
 
@@ -39,7 +42,8 @@ class LiveSpeakerTracker:
                  profiles: Sequence[dict[str, Any]] | Callable[[], Sequence[dict[str, Any]]] = (),
                  sample_rate: int = 16_000, window_seconds: float = 1.5,
                  step_seconds: float = 0.5, min_speech_seconds: float = 1.0,
-                 min_dwell_seconds: float = 1.0, confirmations: int = 2):
+                 min_dwell_seconds: float = 1.0, confirmations: int = 2,
+                 max_local_speakers: int = MAX_LOCAL_SPEAKER_CENTROIDS):
         if sample_rate <= 0 or window_seconds <= 0 or step_seconds <= 0 or min_speech_seconds <= 0:
             raise ValueError("实时声纹窗口参数必须大于零")
         self.vad, self.extractor, self.matcher = vad, extractor, matcher
@@ -50,6 +54,9 @@ class LiveSpeakerTracker:
         self.min_speech_samples = round(min_speech_seconds * sample_rate)
         self.min_dwell_samples = round(min_dwell_seconds * sample_rate)
         self.confirmations = max(1, confirmations)
+        if max_local_speakers < 0:
+            raise ValueError("本地未知说话人上限不能小于零")
+        self.max_local_speakers = max_local_speakers
         self.samples = array.array("f")
         self.processed = 0
         self.base_sample = 0
@@ -58,6 +65,8 @@ class LiveSpeakerTracker:
         self.pending: SpeakerIdentity | None = None
         self.pending_count = 0
         self._local_vectors: list[list[float]] = []
+        # Observable counter only; embeddings are never exposed in events/logs.
+        self.unknown_capacity_exhaustions = 0
 
     @property
     def available(self) -> bool:
@@ -137,6 +146,11 @@ class LiveSpeakerTracker:
         for index, centroid in enumerate(self._local_vectors):
             if len(centroid) == len(vector) and _cosine(centroid, vector) >= 0.82:
                 return SpeakerIdentity(local_speaker_id=f"speaker_{index}")
+        if len(self._local_vectors) >= self.max_local_speakers:
+            # Return a concrete empty identity instead of None: feed() must be
+            # able to move away from a previously registered speaker safely.
+            self.unknown_capacity_exhaustions += 1
+            return SpeakerIdentity()
         self._local_vectors.append(vector)
         return SpeakerIdentity(local_speaker_id=f"speaker_{len(self._local_vectors)-1}")
 
