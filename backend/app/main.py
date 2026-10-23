@@ -111,7 +111,9 @@ async def lifespan(application: FastAPI):
         application.state.database = database
         application.state.files = files
         application.state.speaker_registration_service = SpeakerRegistrationService(
-            database, files, extractor, storage=StorageService(database, files)
+            database, files, extractor, storage=StorageService(database, files),
+            max_sample_bytes=int(os.environ.get("ASR_SPEAKER_SAMPLE_MAX_BYTES", str(64 * 1024 * 1024))),
+            max_sample_duration_seconds=float(os.environ.get("ASR_SPEAKER_SAMPLE_MAX_DURATION_SECONDS", "120")),
         )
 
         online_dir = os.environ.get("ASR_ONLINE_MODEL_DIR")

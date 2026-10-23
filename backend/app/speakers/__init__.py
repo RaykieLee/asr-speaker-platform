@@ -2,7 +2,9 @@
 from .service import (
     EmbeddingModelVersionError,
     MissingSpeakerModelError,
+    SampleDurationTooLongError,
     SampleQualityError,
+    SampleUploadTooLargeError,
     SherpaSpeakerEmbeddingAdapter,
     SpeakerModel,
     SpeakerRegistrationService,
@@ -11,7 +13,8 @@ from .service import (
 )
 
 __all__ = [
-    "EmbeddingModelVersionError", "MissingSpeakerModelError", "SampleQualityError",
+    "EmbeddingModelVersionError", "MissingSpeakerModelError", "SampleDurationTooLongError",
+    "SampleQualityError", "SampleUploadTooLargeError",
     "SherpaSpeakerEmbeddingAdapter", "SpeakerModel", "SpeakerRegistrationService",
     "assess_audio_quality", "l2_normalize",
 ]

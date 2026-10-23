@@ -12,6 +12,7 @@ from backend.app.speakers import (
     SpeakerModel, SpeakerRegistrationService, SherpaSpeakerEmbeddingAdapter,
     assess_audio_quality, l2_normalize,
 )
+from backend.app.speakers.service import SampleDurationTooLongError, SampleUploadTooLargeError
 from backend.app.storage import FileStore, SQLiteStore
 from backend.app.main import app as production_app
 
@@ -190,4 +191,56 @@ def test_speaker_http_sample_upload_and_quality_error(tmp_path):
         assert silent.status_code == 422
         sample_id = good.json()["sample"]["id"]
         assert client.delete(f"/api/v1/speakers/{person['id']}/samples/{sample_id}").json() == {"deleted": True}
+    database.close()
+
+
+def test_speaker_sample_limits_reject_before_decode_and_embedding_and_return_413(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+
+    class CountingExtractor(TestExtractor):
+        calls = 0
+
+        def extract(self, audio):
+            self.calls += 1
+            return super().extract(audio)
+
+    database = SQLiteStore(tmp_path / "db.sqlite3")
+    database.initialize()
+    files = FileStore(tmp_path / "objects")
+    extractor = CountingExtractor()
+    service = SpeakerRegistrationService(
+        database, files, extractor, max_sample_bytes=100_000,
+        max_sample_duration_seconds=1.0,
+    )
+    def fail_decode(data, filename):
+        raise AssertionError("duration cap must run before decoding")
+
+    monkeypatch.setattr(service, "_decode_upload", fail_decode)
+    speaker = service.create_speaker("限制测试")
+
+    with pytest.raises(SampleUploadTooLargeError):
+        service.add_sample(speaker["id"], "large.wav", b"x" * 100_001)
+    with pytest.raises(SampleDurationTooLongError):
+        service.add_sample(speaker["id"], "long.wav", tone(1.25))
+    assert extractor.calls == 0
+    assert database.list_samples(speaker["id"]) == []
+
+    app = FastAPI()
+    app.state.speaker_registration_service = service
+    from backend.app.api.speakers import router
+    app.include_router(router)
+    with TestClient(app) as client:
+        too_large = client.post(
+            f"/api/v1/speakers/{speaker['id']}/samples",
+            files={"file": ("large.wav", b"x" * 100_001, "audio/wav")},
+        )
+        too_long = client.post(
+            f"/api/v1/speakers/{speaker['id']}/samples",
+            files={"file": ("long.wav", tone(1.25), "audio/wav")},
+        )
+        assert too_large.status_code == 413
+        assert too_large.json()["detail"]["code"] == "sample_too_large"
+        assert too_long.status_code == 413
+        assert too_long.json()["detail"]["code"] == "sample_too_long"
+    assert extractor.calls == 0
     database.close()

@@ -33,6 +33,8 @@ uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 
 The version value above labels the selected embedding artifact in stored profiles. Keep it unchanged for those profile vectors; if you replace the model, set a new version and re-enroll profiles. The service stores the SQLite database and uploaded audio under `ASR_DATA_DIR`.
 
+Speaker enrollment uploads are limited to 64 MiB and 120 seconds by default. Override with `ASR_SPEAKER_SAMPLE_MAX_BYTES` and `ASR_SPEAKER_SAMPLE_MAX_DURATION_SECONDS`; both must be positive. Oversized files and overlong samples return HTTP 413 before embedding extraction. WAV duration is checked from its header; other formats require `ffprobe` (installed with FFmpeg) for a pre-decode duration check.
+
 打开 [健康检查](http://127.0.0.1:8000/health) 或 [交互式 API 文档](http://127.0.0.1:8000/docs)。
 
 ## 网页 Demo

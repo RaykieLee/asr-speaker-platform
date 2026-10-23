@@ -6,11 +6,26 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from backend.app.speakers.service import (
-    EmbeddingModelVersionError, MissingSpeakerModelError, SampleQualityError,
+    EmbeddingModelVersionError, MissingSpeakerModelError, SampleDurationTooLongError,
+    SampleQualityError, SampleUploadTooLargeError,
     SpeakerNotFoundError, SpeakerRegistrationService,
 )
 
 router = APIRouter(prefix="/api/v1/speakers", tags=["speakers"])
+
+
+async def _read_upload_limited(upload: Any, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(min(1024 * 1024, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise SampleUploadTooLargeError(f"声纹样本超过 {limit} 字节限制")
+    return b"".join(chunks)
 
 
 def _service(request: Request) -> SpeakerRegistrationService:
@@ -29,6 +44,10 @@ def _raise(exc: Exception) -> None:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(exc, SampleQualityError):
         raise HTTPException(status_code=422, detail={"message": str(exc), "quality": exc.quality}) from exc
+    if isinstance(exc, SampleUploadTooLargeError):
+        raise HTTPException(status_code=413, detail={"code": "sample_too_large", "message": str(exc)}) from exc
+    if isinstance(exc, SampleDurationTooLongError):
+        raise HTTPException(status_code=413, detail={"code": "sample_too_long", "message": str(exc)}) from exc
     if isinstance(exc, ValueError):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     raise exc
@@ -66,12 +85,26 @@ def rename_speaker(speaker_id: str, request: Request, payload: dict[str, Any]) -
 @router.post("/{speaker_id}/samples", status_code=201)
 async def add_sample(speaker_id: str, request: Request) -> dict[str, Any]:
     try:
-        form = await request.form()
+        service = _service(request)
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError as exc:
+                raise ValueError("Content-Length 无效") from exc
+            # Allow bounded multipart framing/headers while rejecting obviously
+            # oversized requests before Starlette spools the uploaded part.
+            if declared_size > service.max_sample_bytes + 1024 * 1024:
+                raise SampleUploadTooLargeError(
+                    f"声纹样本超过 {service.max_sample_bytes} 字节限制"
+                )
+        form = await request.form(max_files=1, max_fields=4, max_part_size=64 * 1024)
         upload = form.get("file")
         if upload is None or not hasattr(upload, "read"):
             raise ValueError("请使用 multipart/form-data 上传 file 字段")
-        return _service(request).add_sample(
-            speaker_id, getattr(upload, "filename", None) or "sample.wav", await upload.read()
+        return service.add_sample(
+            speaker_id, getattr(upload, "filename", None) or "sample.wav",
+            await _read_upload_limited(upload, service.max_sample_bytes),
         )
     except Exception as exc:
         _raise(exc)
