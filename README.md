@@ -37,7 +37,7 @@ The version value above labels the selected embedding artifact in stored profile
 
 ## 网页 Demo
 
-在另一个终端运行 `node frontend/server.mjs`，打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)。页面可进行实时录音、上传文件、查看说话人时间轴、人工修正说话人标签、下载 JSON/TXT/SRT、管理声纹人员和编辑版本化热词。若后端使用了其他端口，设置 `ASR_BACKEND_URL=http://127.0.0.1:端口` 后启动网页代理；若设置了 `ASR_API_TOKEN`，在页面顶部填写相同的 token。详见 [frontend/README.md](frontend/README.md)。
+在另一个终端运行 `node frontend/server.mjs`，打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)。页面可进行实时录音、上传文件、查看说话人时间轴、人工修正说话人标签、下载 JSON/TXT/SRT、管理声纹人员和编辑版本化热词。双麦立体声文件可选择左右声道分别识别，结果显示声道号。若后端使用了其他端口，设置 `ASR_BACKEND_URL=http://127.0.0.1:端口` 后启动网页代理；若设置了 `ASR_API_TOKEN`，在页面顶部填写相同的 token。详见 [frontend/README.md](frontend/README.md)。
 
 运行 `python demo/prepare_samples.py` 可从本机已验证的模型归档中生成两声音流程样本，再按 [demo/README.md](demo/README.md) 完成演示。样本是流程检查资料，不能代替业务录音的准确率评估。
 
@@ -52,7 +52,7 @@ python -m loadtest --base-url http://127.0.0.1:8000 \
   --server-pid 12345 --output data/baseline/my-run
 ```
 
-将示例中的 `12345` 换成实际服务进程 PID。参数、验收门槛及报告字段见 [loadtest/README.md](loadtest/README.md)。本机基线见 [reports/mac-baseline-2026-10-23.md](reports/mac-baseline-2026-10-23.md)；目标部署机器上的并发容量须在相同模型、代表性录音、热词和声纹规模下重新测量。
+将示例中的 `12345` 换成实际服务进程 PID。参数、验收门槛及离线 HTML 图表生成方法见 [loadtest/README.md](loadtest/README.md)。本机基线见 [reports/mac-baseline-2026-10-23.md](reports/mac-baseline-2026-10-23.md)；目标部署机器上的并发容量须在相同模型、代表性录音、热词和声纹规模下重新测量。
 
 ## Linux container setup
 
