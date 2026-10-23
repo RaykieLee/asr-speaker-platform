@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import stat
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -217,7 +219,7 @@ def _readiness_snapshot(state) -> dict:
     checks = {
         "initialization_complete": bool(getattr(state, "initialization_complete", False)),
         "database": queue_available,
-        "file_storage": getattr(state, "files", None) is not None,
+        "file_storage": _file_storage_ready(getattr(state, "files", None)),
         "online_asr": getattr(state, "live_asr_service", None) is not None,
         "offline_asr": transcription is not None,
         "speaker_embedding": registration is not None and getattr(registration, "extractor", None) is not None,
@@ -228,6 +230,45 @@ def _readiness_snapshot(state) -> dict:
         "status": "ready" if all(checks.values()) else "not_ready",
         "checks": checks,
     }
+
+
+def _file_storage_ready(files) -> bool:
+    """Probe the configured backing directory without exposing its path."""
+    root = getattr(files, "root", None)
+    if not isinstance(root, Path):
+        return False
+    probe_path = None
+    probe_fd = None
+    marker = os.urandom(16)
+    ready = False
+    try:
+        mode = root.stat().st_mode
+        has_read_write_search_bits = bool(mode & 0o444 and mode & 0o222 and mode & 0o111)
+        if (stat.S_ISDIR(mode) and has_read_write_search_bits
+                and os.access(root, os.R_OK | os.W_OK | os.X_OK)):
+            probe_fd, probe_path = tempfile.mkstemp(prefix=".asr-ready-", dir=root)
+            descriptor = probe_fd
+            probe_fd = None
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(marker)
+                stream.flush()
+            ready = Path(probe_path).read_bytes() == marker
+    except OSError:
+        ready = False
+    finally:
+        if probe_fd is not None:
+            try:
+                os.close(probe_fd)
+            except OSError:
+                ready = False
+        if probe_path is not None:
+            try:
+                os.unlink(probe_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                ready = False
+    return ready
 
 
 def _file_queue_snapshot(transcription) -> dict:

@@ -70,6 +70,7 @@ def test_status_reports_only_file_queue_counts_and_ready_when_fake_services_exis
         assert incomplete.json()["checks"]["initialization_complete"] is False
         monkeypatch.setattr(state, "initialization_complete", True)
         assert client.get("/ready").status_code == 200
+        assert list(state.files.root.glob(".asr-ready-*")) == []
         response = client.get("/api/v1/status")
         assert response.status_code == 200
         payload = response.json()
@@ -80,3 +81,34 @@ def test_status_reports_only_file_queue_counts_and_ready_when_fake_services_exis
         assert payload["status"] == "ready"
         assert "PRIVATE TRANSCRIPT" not in response.text
         assert "private.wav" not in response.text
+
+
+def test_readiness_fails_when_storage_root_is_missing_without_leaking_path(monkeypatch, tmp_path):
+    _disable_models(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        storage_root = app.state.files.root
+        storage_root.rmdir()
+
+        ready = client.get("/ready")
+        assert ready.status_code == 503
+        assert ready.json()["checks"]["file_storage"] is False
+        status = client.get("/api/v1/status")
+        assert status.json()["checks"]["file_storage"] is False
+        assert str(storage_root) not in ready.text + status.text
+
+
+def test_readiness_fails_when_storage_root_is_not_writable(monkeypatch, tmp_path):
+    _disable_models(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        storage_root = app.state.files.root
+        original_mode = storage_root.stat().st_mode
+        storage_root.chmod(original_mode & ~0o222)
+        try:
+            ready = client.get("/ready")
+            assert ready.status_code == 503
+            assert ready.json()["checks"]["file_storage"] is False
+            status = client.get("/api/v1/status")
+            assert status.json()["checks"]["file_storage"] is False
+            assert str(storage_root) not in ready.text + status.text
+        finally:
+            storage_root.chmod(original_mode)
