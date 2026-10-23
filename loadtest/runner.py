@@ -501,7 +501,10 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
         "thresholds": {
             "max_error_rate": args.max_error_rate,
             "max_first_partial_p95_seconds": args.max_first_partial_p95,
-            "max_final_p95_seconds": args.max_final_p95,
+            "max_completion_after_stop_p95_seconds": args.max_completion_after_stop_p95,
+            # Preserve the legacy report key; its meaning has always been
+            # stop-to-completed latency, despite the ambiguous name.
+            "max_final_p95_seconds": args.max_completion_after_stop_p95,
             "max_client_backlog_seconds": args.max_backlog,
             "max_server_dropped_frames": args.max_server_drops,
         },
@@ -543,7 +546,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server-pid", type=int, help="sample this server process if psutil is installed")
     parser.add_argument("--max-error-rate", type=float, default=0.01)
     parser.add_argument("--max-first-partial-p95", type=float, default=2.0)
-    parser.add_argument("--max-final-p95", type=float, default=8.0)
+    parser.add_argument(
+        "--max-completion-after-stop-p95", "--max-final-p95",
+        dest="max_completion_after_stop_p95", type=float, default=8.0,
+        help="maximum P95 seconds from sending stop to completed (legacy alias: --max-final-p95)",
+    )
     parser.add_argument("--max-backlog", type=float, default=0.5)
     parser.add_argument("--max-server-drops", type=int, default=0)
     parser.add_argument("--target-os", help="target ASR server OS/version; recorded as supplied")
@@ -569,7 +576,7 @@ def main() -> int:
         args.file_concurrency < 1 or args.repeats < 1 or args.timeout <= 0
         or args.poll_interval <= 0 or args.resource_interval <= 0
         or not 0 <= args.max_error_rate <= 1
-        or min(args.max_first_partial_p95, args.max_final_p95, args.max_backlog, args.max_server_drops) < 0
+        or min(args.max_first_partial_p95, args.max_completion_after_stop_p95, args.max_backlog, args.max_server_drops) < 0
     ):
         parser.error("concurrency/repeats/intervals must be positive and thresholds nonnegative (error rate 0..1)")
     try:

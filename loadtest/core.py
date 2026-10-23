@@ -334,7 +334,10 @@ def evaluate_gates(summary: dict[str, Any], thresholds: dict[str, Any]) -> dict[
         ),
         "completion_after_stop_p95_seconds": (
             summary["latency_seconds"]["completion_after_stop"]["p95"],
-            thresholds.get("max_final_p95_seconds"),
+            thresholds.get(
+                "max_completion_after_stop_p95_seconds",
+                thresholds.get("max_final_p95_seconds"),
+            ),
         ),
         "max_client_backlog_seconds": (
             summary["max_client_backlog_seconds"],
