@@ -1,5 +1,5 @@
 import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, formatTime, hotwordComparisonPlan, hotwordId,
-  fileTranscriptionSettings, groupCorrectionTargets, normalizeHotwordEntry, normalizeJobForDisplay, parseHotwordImport,
+  fileTranscriptionSettings, groupCorrectionTargets, normalizeHotwordEntry, normalizeJobForDisplay, parseHotwordImport, readinessLabel,
   resampleTo16k, serializeHotwordEntries, speakerCorrectionPayload, streamStartMessage, toS16LE,
   trackTranscriptionJob } from './logic.mjs';
 
@@ -25,6 +25,8 @@ async function request(path, options = {}) {
     const error = new Error(typeof detail === 'string' ? detail : detail?.message || body?.message || `${response.status} ${response.statusText}`);
     error.quality = detail?.quality;
     error.code = detail?.code || body?.code || body?.type || null;
+    error.statusCode = response.status;
+    error.payload = body;
     throw error;
   }
   return body;
@@ -45,16 +47,29 @@ function activateView(name) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
   if (name === 'speakers') loadSpeakers(); if (name === 'hotwords') loadHotwords();
 }
-function setConnection(ok, text) {
-  const pill = $('connection-pill'); pill.classList.toggle('online', ok); pill.classList.toggle('offline', !ok);
-  pill.lastElementChild.textContent = text; $('sidebar-status-dot').classList.toggle('online', ok);
-  $('notice-title').textContent = ok ? '识别服务已连接' : '无法连接识别服务';
-  $('notice-copy').textContent = ok ? '可以开始调用已配置的识别能力。' : '请检查服务地址和后端进程；模型未配置时，相应操作会返回明确错误。';
+function setConnection(alive, text, ready = alive) {
+  const pill = $('connection-pill'); pill.classList.toggle('online', alive && ready);
+  pill.classList.toggle('degraded', alive && !ready); pill.classList.toggle('offline', !alive);
+  pill.lastElementChild.textContent = text; $('sidebar-status-dot').classList.toggle('online', alive && ready);
+  $('notice-title').textContent = !alive ? '无法连接识别服务' : ready ? '识别服务已就绪' : '服务在线但未就绪';
+  $('notice-copy').textContent = !alive ? '请检查服务地址和后端进程。' : ready
+    ? '在线与离线识别、声纹和分段模型均可用。'
+    : '进程仍在运行，但模型或服务组件尚未就绪；请检查后端模型配置。';
 }
 async function checkHealth() {
   $('footer-api').textContent = apiBase();
-  try { await request('/health'); setConnection(true, '服务在线'); }
-  catch (error) { setConnection(false, '服务离线'); }
+  try { await request('/health'); }
+  catch (error) { setConnection(false, '服务离线'); return; }
+  try {
+    const result = await request('/ready');
+    const label = readinessLabel(result);
+    setConnection(true, label.text, label.ready);
+  } catch (error) {
+    if (error.statusCode === 503) {
+      const label = readinessLabel(error.payload);
+      setConnection(true, label.text, false);
+    } else setConnection(true, '状态暂不可用', false);
+  }
 }
 function selectOptions(select, selected = '') {
   const keep = select.value || selected;

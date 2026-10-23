@@ -5,7 +5,8 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from backend.app.api.auth import api_key_middleware
 from backend.app.api.hotwords import router as hotwords_router
@@ -88,6 +89,7 @@ def _speaker_profiles(database: SQLiteStore) -> list[dict]:
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    application.state.initialization_complete = False
     data_dir = Path(os.environ.get("ASR_DATA_DIR", "data")).expanduser()
     database = SQLiteStore(data_dir / "platform.sqlite3")
     database.initialize()
@@ -172,8 +174,10 @@ async def lifespan(application: FastAPI):
                 max_upload_bytes=int(os.environ.get("ASR_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))),
                 max_pending_jobs=int(os.environ.get("ASR_MAX_PENDING_JOBS", "32")),
             )
+        application.state.initialization_complete = True
         yield
     finally:
+        application.state.initialization_complete = False
         service = getattr(application.state, "transcription_service", None)
         if service is not None:
             service.close()
@@ -198,16 +202,83 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/v1/status", tags=["health"])
-def service_status() -> dict:
+def _readiness_snapshot(state) -> dict:
+    transcription = getattr(state, "transcription_service", None)
+    registration = getattr(state, "speaker_registration_service", None)
+    database = getattr(state, "database", None)
+    queue_available = database is not None
+    if queue_available:
+        try:
+            database.count_jobs(status="queued")
+            database.count_jobs(status="running")
+        except Exception:
+            queue_available = False
+
+    checks = {
+        "initialization_complete": bool(getattr(state, "initialization_complete", False)),
+        "database": queue_available,
+        "file_storage": getattr(state, "files", None) is not None,
+        "online_asr": getattr(state, "live_asr_service", None) is not None,
+        "offline_asr": transcription is not None,
+        "speaker_embedding": registration is not None and getattr(registration, "extractor", None) is not None,
+        "file_diarization": transcription is not None and
+        getattr(getattr(transcription, "asr", None), "diarizer", None) is not None,
+    }
     return {
-        "online_asr": app.state.live_asr_service is not None,
-        "offline_asr": app.state.transcription_service is not None,
-        "speaker_embedding": app.state.speaker_registration_service.extractor is not None,
-        "file_diarization": (
-            app.state.transcription_service is not None
-            and app.state.transcription_service.asr.diarizer is not None
-        ),
-        "active_streams": app.state.active_streams,
-        "max_streams": app.state.max_streams,
+        "status": "ready" if all(checks.values()) else "not_ready",
+        "checks": checks,
+    }
+
+
+def _file_queue_snapshot(transcription) -> dict:
+    if transcription is None:
+        return {
+            "available": False, "queued": None, "running": None,
+            "active": None, "capacity": None, "available_slots": None,
+        }
+    capacity = getattr(transcription, "max_pending_jobs", None)
+    if not isinstance(capacity, int) or capacity < 1:
+        return {
+            "available": False, "queued": None, "running": None,
+            "active": None, "capacity": None, "available_slots": None,
+        }
+    try:
+        queued = transcription.database.count_jobs(status="queued")
+        running = transcription.database.count_jobs(status="running")
+    except Exception:
+        return {
+            "available": False, "queued": None, "running": None,
+            "active": None, "capacity": capacity, "available_slots": None,
+        }
+    active = queued + running
+    return {
+        "available": True, "queued": queued, "running": running,
+        "active": active, "capacity": capacity,
+        "available_slots": max(0, capacity - active),
+    }
+
+
+@app.get("/ready", tags=["health"])
+def readiness(request: Request):
+    """Report whether the complete ASR service stack can accept work."""
+    snapshot = _readiness_snapshot(request.app.state)
+    return JSONResponse(status_code=200 if snapshot["status"] == "ready" else 503,
+                        content=snapshot)
+
+
+@app.get("/api/v1/status", tags=["health"])
+def service_status(request: Request) -> dict:
+    state = request.app.state
+    transcription = getattr(state, "transcription_service", None)
+    registration = getattr(state, "speaker_registration_service", None)
+    return {
+        **_readiness_snapshot(state),
+        "online_asr": getattr(state, "live_asr_service", None) is not None,
+        "offline_asr": transcription is not None,
+        "speaker_embedding": registration is not None and getattr(registration, "extractor", None) is not None,
+        "file_diarization": transcription is not None and
+        getattr(getattr(transcription, "asr", None), "diarizer", None) is not None,
+        "active_streams": getattr(state, "active_streams", 0),
+        "max_streams": getattr(state, "max_streams", None),
+        "file_queue": _file_queue_snapshot(transcription),
     }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, fileTranscriptionSettings, formatTime, hotwordEntriesToText, hotwordId,
-  groupCorrectionTargets, hotwordComparisonPlan, mergeHotwordEntries, normalizeJobForDisplay, parseHotwordImport, percentile,
+  groupCorrectionTargets, hotwordComparisonPlan, mergeHotwordEntries, normalizeJobForDisplay, parseHotwordImport, percentile, readinessLabel,
   resampleTo16k, serializeHotwordEntries, speakerCorrectionPayload, streamStartMessage, toS16LE, trackTranscriptionJob } from './public/logic.mjs';
 
 test('percentile uses nearest-rank and handles empty input', () => {
@@ -17,6 +17,12 @@ test('audio helpers resample and encode signed little-endian PCM', () => {
 test('time display is stable for missing and long durations', () => {
   assert.equal(formatTime(125), '02:05');
   assert.equal(formatTime(null), '—');
+});
+
+test('readiness distinguishes an offline process, missing models and a ready service', () => {
+  assert.deepEqual(readinessLabel({status:'ready',checks:{}}), {text:'服务就绪',ready:true});
+  assert.deepEqual(readinessLabel({status:'not_ready',checks:{online_asr:false}}), {text:'模型未就绪',ready:false});
+  assert.deepEqual(readinessLabel({status:'not_ready',checks:{database:false}}), {text:'服务未就绪',ready:false});
 });
 
 test('hotword list supports database id and object entries without losing metadata', () => {

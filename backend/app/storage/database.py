@@ -350,6 +350,11 @@ class SQLiteStore:
         args += (limit,)
         return [self._decode("transcription_jobs", r) for r in self._query_all(sql, args)]  # type: ignore[misc]
 
+    def count_jobs(self, *, status: str) -> int:
+        """Count jobs in one lifecycle state without loading task contents."""
+        row = self._query_one("SELECT COUNT(*) AS count FROM transcription_jobs WHERE status=?", (status,))
+        return int(row["count"]) if row is not None else 0
+
     def upsert_segment(self, job_id: str, segment_id: int, start_seconds: float,
                        end_seconds: float, text: str, *, local_speaker_id: str | None = None,
                        registered_speaker_id: str | None = None, overlap: bool = False,
