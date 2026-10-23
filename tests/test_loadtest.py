@@ -7,7 +7,7 @@ import pytest
 
 from loadtest.core import (SessionResult, aggregate_final_speaker_events, evaluate_gates,
                            pace_pcm, percentile, summarize, write_report)
-from loadtest.runner import load_wav, run_file_job, run_live_session, write_repeated_wav
+from loadtest.runner import build_parser, load_wav, run_file_job, run_live_session, write_repeated_wav
 
 
 def test_percentile_uses_linear_interpolation_and_empty_values():
@@ -354,6 +354,35 @@ def test_realtime_completion_gate_measures_after_stop_not_audio_duration():
     gates = evaluate_gates(summary, {"max_final_p95_seconds": 8})
     assert gates["checks"]["completion_after_stop_p95_seconds"]["status"] == "pass"
     assert summary["latency_seconds"]["final_text"]["p95"] == pytest.approx(20.1)
+
+
+def test_completion_gate_flag_aliases_and_report_threshold_keys(tmp_path):
+    parser = build_parser()
+    current = parser.parse_args(["--wav", "sample.wav", "--max-completion-after-stop-p95", "0.4"])
+    legacy = parser.parse_args(["--wav", "sample.wav", "--max-final-p95", "0.4"])
+    assert current.max_completion_after_stop_p95 == legacy.max_completion_after_stop_p95 == 0.4
+
+    summary = summarize([SessionResult(
+        "s", "realtime", completed=True, completion_after_stop_seconds=0.5,
+    )])
+    current_gate = evaluate_gates(summary, {"max_completion_after_stop_p95_seconds": 0.4})
+    legacy_gate = evaluate_gates(summary, {"max_final_p95_seconds": 0.4})
+    assert current_gate == legacy_gate
+    assert current_gate["checks"]["completion_after_stop_p95_seconds"]["status"] == "fail"
+    preferred = evaluate_gates(summary, {
+        "max_completion_after_stop_p95_seconds": 0.4,
+        "max_final_p95_seconds": 0.8,
+    })
+    assert preferred["checks"]["completion_after_stop_p95_seconds"]["limit"] == 0.4
+
+    config = {"thresholds": {
+        "max_completion_after_stop_p95_seconds": 0.4,
+        "max_final_p95_seconds": 0.4,
+    }}
+    report_json, _ = write_report(tmp_path, config=config, results=[], resource_samples=[])
+    report_config = json.loads(report_json.read_text(encoding="utf-8"))["config"]
+    assert report_config["thresholds"]["max_completion_after_stop_p95_seconds"] == 0.4
+    assert report_config["thresholds"]["max_final_p95_seconds"] == 0.4
 
 
 def test_file_throughput_uses_successful_samples_and_seconds_ratio(tmp_path):
