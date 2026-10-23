@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException
 
 from backend.app.speakers.service import (
     EmbeddingModelVersionError, MissingSpeakerModelError, SampleDurationTooLongError,
@@ -12,6 +14,8 @@ from backend.app.speakers.service import (
 )
 
 router = APIRouter(prefix="/api/v1/speakers", tags=["speakers"])
+_BODY_LIMIT_MARKER = "speaker_sample_request_body_limit_exceeded"
+_MULTIPART_OVERHEAD_LIMIT = 512 * 1024
 
 
 async def _read_upload_limited(upload: Any, limit: int) -> bytes:
@@ -84,21 +88,48 @@ def rename_speaker(speaker_id: str, request: Request, payload: dict[str, Any]) -
 
 @router.post("/{speaker_id}/samples", status_code=201)
 async def add_sample(speaker_id: str, request: Request) -> dict[str, Any]:
+    form = None
+    original_receive = request._receive
     try:
         service = _service(request)
+        request_limit = service.max_sample_bytes + _MULTIPART_OVERHEAD_LIMIT
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
                 declared_size = int(content_length)
             except ValueError as exc:
                 raise ValueError("Content-Length 无效") from exc
-            # Allow bounded multipart framing/headers while rejecting obviously
-            # oversized requests before Starlette spools the uploaded part.
-            if declared_size > service.max_sample_bytes + 1024 * 1024:
+            if declared_size < 0:
+                raise ValueError("Content-Length 无效")
+            # This is an early rejection optimization only. The receive wrapper
+            # below remains authoritative when length is absent or understated.
+            if declared_size > request_limit:
                 raise SampleUploadTooLargeError(
                     f"声纹样本超过 {service.max_sample_bytes} 字节限制"
                 )
-        form = await request.form(max_files=1, max_fields=4, max_part_size=64 * 1024)
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await original_receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > request_limit:
+                    # MultiPartParser catches this type and closes any temporary
+                    # upload files it has created before surfacing the error.
+                    raise MultiPartException(_BODY_LIMIT_MARKER)
+            return message
+
+        request._receive = limited_receive
+        try:
+            form = await request.form(max_files=1, max_fields=4, max_part_size=64 * 1024)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 400 and exc.detail == _BODY_LIMIT_MARKER:
+                raise SampleUploadTooLargeError(
+                    f"声纹样本超过 {service.max_sample_bytes} 字节限制"
+                ) from exc
+            raise
         upload = form.get("file")
         if upload is None or not hasattr(upload, "read"):
             raise ValueError("请使用 multipart/form-data 上传 file 字段")
@@ -108,6 +139,10 @@ async def add_sample(speaker_id: str, request: Request) -> dict[str, Any]:
         )
     except Exception as exc:
         _raise(exc)
+    finally:
+        request._receive = original_receive
+        if form is not None:
+            await form.close()
 
 
 @router.delete("/{speaker_id}/samples/{sample_id}")

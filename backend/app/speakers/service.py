@@ -193,7 +193,7 @@ class SpeakerRegistrationService:
                  min_duration_seconds: float = 1.0,
                  max_sample_bytes: int = 64 * 1024 * 1024,
                  max_sample_duration_seconds: float = 120.0):
-        if max_sample_bytes < 1:
+        if isinstance(max_sample_bytes, bool) or not isinstance(max_sample_bytes, int) or max_sample_bytes < 1:
             raise ValueError("max_sample_bytes must be positive")
         if not math.isfinite(max_sample_duration_seconds) or max_sample_duration_seconds <= 0:
             raise ValueError("max_sample_duration_seconds must be positive and finite")
