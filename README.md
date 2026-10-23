@@ -35,7 +35,7 @@ The version value above labels the selected embedding artifact in stored profile
 
 Speaker enrollment uploads are limited to 64 MiB and 120 seconds by default. Override with `ASR_SPEAKER_SAMPLE_MAX_BYTES` (positive integer) and `ASR_SPEAKER_SAMPLE_MAX_DURATION_SECONDS` (positive finite number). The multipart request body also has a hard cap before form parsing, so missing or incorrect `Content-Length` cannot bypass the limit. Oversized files and overlong samples return HTTP 413 before decoding/embedding. WAV duration is checked from its header; other formats require `ffprobe` (installed with FFmpeg) for a pre-decode duration check.
 
-打开 [健康检查](http://127.0.0.1:8000/health) 或 [交互式 API 文档](http://127.0.0.1:8000/docs)。
+`/health` 是轻量存活检查：进程能响应时返回 200，不检查模型。`/ready` 是就绪检查：在线/离线 ASR、声纹嵌入、离线分段模型及存储初始化全部可用时返回 200，否则返回 503；响应只包含组件布尔状态，不含任务文字或音频。受鉴权保护的 `/api/v1/status` 提供组件可用性、实时连接数和文件任务队列负载摘要。Docker Compose 使用 `/ready` 判断容器就绪；启动/配置模型时可用 `/health` 区分进程存活与模型未就绪。也可打开 [交互式 API 文档](http://127.0.0.1:8000/docs)。
 
 ## 网页 Demo
 

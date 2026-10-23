@@ -38,6 +38,16 @@ export function formatTime(seconds) {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
+export function readinessLabel(snapshot) {
+  if (snapshot?.status === 'ready') return { text: '服务就绪', ready: true };
+  const checks = snapshot?.checks || {};
+  const modelChecks = ['online_asr', 'offline_asr', 'speaker_embedding', 'file_diarization'];
+  return {
+    text: modelChecks.some(key => checks[key] === false) ? '模型未就绪' : '服务未就绪',
+    ready: false,
+  };
+}
+
 export function hotwordId(item) {
   return item?.set_id || item?.id || null;
 }
