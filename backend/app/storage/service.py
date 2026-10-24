@@ -62,6 +62,11 @@ class StorageService:
         if failed:
             raise FileCleanupError(failed, first_error or OSError("unknown cleanup failure"))
 
+    def cleanup_unreferenced_files(self, paths: Iterable[str]) -> None:
+        """Clean post-commit object paths, retaining any path still referenced in SQLite."""
+        with self._delete_lock:
+            self._delete_unreferenced(paths)
+
     def delete_sample(self, sample_id: str) -> bool:
         """Delete one sample row and its now-unreferenced audio file."""
         with self._delete_lock:
@@ -74,8 +79,8 @@ class StorageService:
     def delete_speaker(self, speaker_id: str) -> bool:
         """Delete a speaker and clean all its sample files after FK cascades."""
         with self._delete_lock:
-            samples = self.database.list_samples(speaker_id)
-            if not self.database.delete_speaker(speaker_id):
+            paths = self.database.delete_speaker_with_sample_paths(speaker_id)
+            if paths is None:
                 return False
-            self._delete_unreferenced(sample["audio_path"] for sample in samples)
+            self._delete_unreferenced(paths)
             return True
