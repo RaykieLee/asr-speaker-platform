@@ -1,6 +1,6 @@
 import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, formatTime, hotwordComparisonPlan, hotwordId,
   fileTranscriptionSettings, groupCorrectionTargets, normalizeHotwordEntry, normalizeJobForDisplay, parseHotwordImport, readinessLabel,
-  resampleTo16k, serializeHotwordEntries, speakerCorrectionPayload, streamStartMessage, toS16LE,
+  resampleTo16k, serializeHotwordEntries, shouldApplyLiveSegment, speakerCorrectionPayload, streamStartMessage, toS16LE,
   trackTranscriptionJob } from './logic.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -219,9 +219,19 @@ function renderLive() {
 function handleLiveMessage(event) {
   let data; try { data = JSON.parse(event.data); } catch { return; }
   if (data.type === 'started') { $('live-state-title').textContent = '正在识别'; $('live-state-copy').textContent = data.hotword_set_version ? `热词快照 v${data.hotword_set_version}` : '音频已连接'; if (data.hotword_set_version) $('live-hotword-version').textContent = `v${data.hotword_set_version}`; }
-  else if (data.type === 'segment') { state.liveSegments.set(data.segment_id, data); renderLive(); }
+  else if (data.type === 'segment') {
+    const previous = state.liveSegments.get(data.segment_id);
+    if (!shouldApplyLiveSegment(previous, data)) return;
+    state.liveSegments.set(data.segment_id, data); renderLive();
+  }
   else if (data.type === 'completed') { stopCapture(false); $('live-state-title').textContent = '会话已完成'; $('live-state-copy').textContent = `时长 ${formatTime(data.duration)}`; toast('实时识别已完成'); }
-  else if (data.type === 'error') { stopCapture(false); $('live-state-title').textContent = '识别遇到问题'; $('live-state-copy').textContent = data.message; toast(data.message || '实时识别失败', 'error'); }
+  else if (data.type === 'error') {
+    if (String(data.code || '').startsWith('offline_final_')) {
+      toast(`${data.message || '离线复识失败'}；该片段保留在线识别文字`, 'error');
+      return;
+    }
+    stopCapture(false); $('live-state-title').textContent = '识别遇到问题'; $('live-state-copy').textContent = data.message; toast(data.message || '实时识别失败', 'error');
+  }
 }
 async function startLive() {
   if (!navigator.mediaDevices?.getUserMedia) { toast('当前页面无法访问麦克风，请使用 localhost 或 HTTPS。', 'error'); return; }

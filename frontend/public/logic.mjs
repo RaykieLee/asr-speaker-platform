@@ -5,6 +5,10 @@ export function percentile(values, p) {
   return sorted[index];
 }
 
+export function shouldApplyLiveSegment(previous, incoming) {
+  return !previous || Number(incoming.revision || 0) >= Number(previous.revision || 0);
+}
+
 export function resampleTo16k(input, inputRate) {
   if (!inputRate || inputRate < 16000) {
     if (inputRate === 16000) return new Float32Array(input);

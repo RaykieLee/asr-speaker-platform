@@ -2,7 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, fileTranscriptionSettings, formatTime, hotwordEntriesToText, hotwordId,
   groupCorrectionTargets, hotwordComparisonPlan, mergeHotwordEntries, normalizeJobForDisplay, parseHotwordImport, percentile, readinessLabel,
-  resampleTo16k, serializeHotwordEntries, speakerCorrectionPayload, streamStartMessage, toS16LE, trackTranscriptionJob } from './public/logic.mjs';
+  resampleTo16k, serializeHotwordEntries, shouldApplyLiveSegment, speakerCorrectionPayload, streamStartMessage, toS16LE, trackTranscriptionJob } from './public/logic.mjs';
+
+test('live offline revisions replace the same segment without accepting stale events', () => {
+  assert.equal(shouldApplyLiveSegment(undefined, {revision: 1}), true);
+  assert.equal(shouldApplyLiveSegment({revision: 5}, {revision: 6}), true);
+  assert.equal(shouldApplyLiveSegment({revision: 6}, {revision: 5}), false);
+});
 
 test('percentile uses nearest-rank and handles empty input', () => {
   assert.equal(percentile([10, 1, 3, 2], 0.5), 2);
