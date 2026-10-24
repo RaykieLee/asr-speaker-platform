@@ -79,7 +79,7 @@ python -m loadtest --base-url http://127.0.0.1:8000 \
   --server-pid 12345 --output data/baseline/my-run
 ```
 
-将示例中的 `12345` 换成实际服务进程 PID。参数、验收门槛及离线 HTML 图表生成方法见 [loadtest/README.md](loadtest/README.md)。本机基线见 [reports/mac-baseline-2026-10-23.md](reports/mac-baseline-2026-10-23.md)；目标部署机器上的并发容量须在相同模型、代表性录音、热词和声纹规模下重新测量。
+将示例中的 `12345` 换成实际服务进程 PID。参数、验收门槛及离线 HTML 图表生成方法见 [loadtest/README.md](loadtest/README.md)。最终进程结构的本机文件与混合负载结果见 [reports/mac-final-2026-10-25.md](reports/mac-final-2026-10-25.md)，早期基线见 [reports/mac-baseline-2026-10-23.md](reports/mac-baseline-2026-10-23.md)；目标部署机器上的并发容量须在相同模型、代表性录音、热词和声纹规模下重新测量。
 
 人工标注的质量基线可用 [质量评估工具](evaluation/README.md) 计算 CER/WER、说话人时间误差、换人边界、注册命中/未知误认和热词启停对照。没有相应人工标注时工具会标记“不可评估”。
 
