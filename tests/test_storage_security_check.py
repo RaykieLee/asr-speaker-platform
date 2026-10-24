@@ -38,6 +38,28 @@ def test_permissions_fail_closed_on_symlinks_and_required_missing(tmp_path: Path
     assert inspect_permissions(tmp_path / "missing", required=False)[:2] == (True, "optional_missing")
 
 
+def test_permissions_require_expected_object_types(tmp_path: Path) -> None:
+    database_directory = tmp_path / "platform.sqlite3"
+    database_directory.mkdir(mode=0o700)
+    assert inspect_permissions(
+        database_directory, required=True, expected_type="file"
+    )[:2] == (False, "wrong_type")
+
+    recordings_file = tmp_path / "files"
+    recordings_file.write_bytes(b"not a directory")
+    recordings_file.chmod(0o600)
+    assert inspect_permissions(
+        recordings_file, required=True, tree=True, expected_type="directory"
+    )[:2] == (False, "wrong_type")
+
+    backup_file = tmp_path / "backup"
+    backup_file.write_bytes(b"not a directory")
+    backup_file.chmod(0o600)
+    assert inspect_permissions(
+        backup_file, required=True, tree=True, expected_type="directory"
+    )[:2] == (False, "wrong_type")
+
+
 def test_macos_requires_filevault_and_encrypted_volume_for_path(tmp_path: Path) -> None:
     anchor = tmp_path
     encrypted = plistlib.dumps({"MountPoint": str(tmp_path), "FileVault": True})
@@ -66,15 +88,6 @@ def test_macos_requires_filevault_and_encrypted_volume_for_path(tmp_path: Path) 
         return _completed(plistlib.dumps({"MountPoint": str(tmp_path), "FileVault": False}))
 
     assert not macos_volume_encrypted(anchor, unencrypted_volume)
-
-    def wrong_volume(command: list[str]) -> subprocess.CompletedProcess[bytes]:
-        if command[0].endswith("fdesetup"):
-            return _completed(b"FileVault is On.\n")
-        if command[0].endswith("df"):
-            return _completed(df_output)
-        return _completed(plistlib.dumps({"MountPoint": "/different-volume", "FileVault": True}))
-
-    assert not macos_volume_encrypted(anchor, wrong_volume)
 
     def wrong_volume(command: list[str]) -> subprocess.CompletedProcess[bytes]:
         if command[0].endswith("fdesetup"):
@@ -159,3 +172,39 @@ def test_run_checks_requires_backup_and_encryption_checks(tmp_path: Path, monkey
     failed = run_checks(data, [backup], platform="Darwin")
     assert failed["status"] == "fail"
     assert all("path" not in item for item in failed["checks"])
+
+
+def test_run_checks_rejects_directories_or_files_in_place_of_required_objects(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    # A directory named like the SQLite database used to pass mode-only checks.
+    (data / "platform.sqlite3").mkdir(mode=0o700)
+    # A regular file cannot stand in for the recordings tree or backup directory.
+    (data / "files").write_bytes(b"wrong kind")
+    (data / "files").chmod(0o600)
+    backup = tmp_path / "backup"
+    backup.write_bytes(b"wrong kind")
+    backup.chmod(0o600)
+    monkeypatch.setattr("scripts.storage_security_check.macos_volume_encrypted", lambda path: True)
+
+    result = run_checks(data, [backup], platform="Darwin")
+    assert result["status"] == "fail"
+    by_name = {item["check"]: item for item in result["checks"]}
+    assert by_name["sqlite_main_permissions"]["code"] == "wrong_type"
+    assert by_name["recordings_permissions"]["code"] == "wrong_type"
+    assert by_name["backup_1_permissions"]["code"] == "wrong_type"
+    assert all("path" not in item for item in result["checks"])
+
+
+def test_tree_rejects_special_files_even_when_private(tmp_path: Path) -> None:
+    import os
+
+    root = tmp_path / "private-tree"
+    root.mkdir(mode=0o700)
+    fifo = root / "pipe"
+    os.mkfifo(fifo, 0o600)
+    assert inspect_permissions(
+        root, required=True, tree=True, expected_type="directory"
+    )[:2] == (False, "unsupported_type")

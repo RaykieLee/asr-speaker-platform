@@ -42,27 +42,41 @@ def _existing_anchor(path: Path) -> Path:
     return candidate
 
 
-def inspect_permissions(path: Path, *, required: bool, tree: bool = False) -> tuple[bool, str, int]:
-    """Require private POSIX mode bits and reject symlinks in checked trees."""
+def inspect_permissions(
+    path: Path,
+    *,
+    required: bool,
+    tree: bool = False,
+    expected_type: str | None = None,
+) -> tuple[bool, str, int]:
+    """Require private mode bits, expected object types, and no symlinks."""
     if not path.exists() and not path.is_symlink():
         return (not required, "missing" if required else "optional_missing", 0)
     count = 0
-    pending = [path]
+    pending = [(path, True)]
     while pending:
-        current = pending.pop()
+        current, is_root = pending.pop()
         try:
             info = current.lstat()
         except OSError:
             return False, "stat_failed", count
         if stat.S_ISLNK(info.st_mode):
             return False, "symlink", count
+        is_directory = stat.S_ISDIR(info.st_mode)
+        is_regular_file = stat.S_ISREG(info.st_mode)
+        if is_root and expected_type == "file" and not is_regular_file:
+            return False, "wrong_type", count
+        if is_root and expected_type == "directory" and not is_directory:
+            return False, "wrong_type", count
+        if tree and not (is_directory or is_regular_file):
+            return False, "unsupported_type", count
         count += 1
         if stat.S_IMODE(info.st_mode) & 0o077:
             return False, "group_or_other_access", count
-        if tree and stat.S_ISDIR(info.st_mode):
+        if tree and is_directory:
             try:
                 with os.scandir(current) as entries:
-                    pending.extend(Path(entry.path) for entry in entries)
+                    pending.extend((Path(entry.path), False) for entry in entries)
             except OSError:
                 return False, "scan_failed", count
     return True, "private_mode", count
@@ -148,18 +162,28 @@ def run_checks(data_dir: Path, backup_dirs: list[Path], *, platform: str | None 
     platform = platform or sys.platform
     database = data_dir / "platform.sqlite3"
     checks: list[dict[str, str | bool]] = []
-    data_ok, data_code, _ = inspect_permissions(data_dir, required=True)
+    data_ok, data_code, _ = inspect_permissions(
+        data_dir, required=True, expected_type="directory"
+    )
     checks.append(_check("data_directory_permissions", data_ok, data_code))
-    db_ok, db_code, _ = inspect_permissions(database, required=True)
+    db_ok, db_code, _ = inspect_permissions(
+        database, required=True, expected_type="file"
+    )
     checks.append(_check("sqlite_main_permissions", db_ok, db_code))
     for suffix in ("-wal", "-shm"):
-        ok, code, _ = inspect_permissions(Path(str(database) + suffix), required=False)
+        ok, code, _ = inspect_permissions(
+            Path(str(database) + suffix), required=False, expected_type="file"
+        )
         checks.append(_check(f"sqlite_{suffix[1:]}_permissions", ok, code))
     recordings = data_dir / "files"
-    ok, code, _ = inspect_permissions(recordings, required=True, tree=True)
+    ok, code, _ = inspect_permissions(
+        recordings, required=True, tree=True, expected_type="directory"
+    )
     checks.append(_check("recordings_permissions", ok, code))
     for index, backup in enumerate(backup_dirs, start=1):
-        ok, code, _ = inspect_permissions(backup, required=True, tree=True)
+        ok, code, _ = inspect_permissions(
+            backup, required=True, tree=True, expected_type="directory"
+        )
         checks.append(_check(f"backup_{index}_permissions", ok, code))
 
     encryption_paths: list[tuple[str, Path]] = [("data_at_rest_encryption", data_dir)]
