@@ -100,6 +100,16 @@ def _resolved_offline_stream_words(service: HotwordService | None, set_id: str,
     return words, snapshot.version
 
 
+def _compile_offline_inline_words(service: HotwordService | None,
+                                  phrases: list[str]) -> list[str]:
+    if service is None:
+        return []
+    compiled = service.compiler.compile(
+        [{"word": phrase.strip(), "aliases": [], "enabled": True} for phrase in phrases], 1.0
+    )
+    return [" ".join(entry["tokens"]) for entry in compiled["entries"]]
+
+
 def _speaker_profiles(database: SQLiteStore) -> list[dict]:
     profiles = []
     for speaker in database.list_speakers(status="active"):
@@ -172,6 +182,8 @@ async def lifespan(application: FastAPI):
                 recognizer, hotword_resolver=lambda set_id: _resolved_stream_words(online_hotwords, set_id),
                 offline_hotword_resolver=lambda set_id, version: _resolved_offline_stream_words(
                     application.state.offline_hotword_service, set_id, version),
+                offline_inline_hotword_resolver=lambda phrases: _compile_offline_inline_words(
+                    application.state.offline_hotword_service, phrases),
                 vad=EnergyVAD() if extractor is not None else None,
                 speaker_extractor=extractor,
                 speaker_matcher=profile_cosine_matcher(

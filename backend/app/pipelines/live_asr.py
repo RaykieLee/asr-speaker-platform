@@ -286,7 +286,8 @@ class LiveASRService:
                  hotword_resolver: Any = None, vad: Any = None,
                  speaker_extractor: Any = None, speaker_matcher: Any = None,
                  speaker_profiles: Any = (), speaker_options: dict[str, Any] | None = None,
-                 offline_hotword_resolver: Any = None):
+                 offline_hotword_resolver: Any = None,
+                 offline_inline_hotword_resolver: Any = None):
         if queue_size < 1:
             raise ValueError("queue_size must be positive")
         self.recognizer = recognizer
@@ -298,6 +299,7 @@ class LiveASRService:
         self.speaker_profiles = speaker_profiles
         self.speaker_options = speaker_options or {}
         self.offline_hotword_resolver = offline_hotword_resolver
+        self.offline_inline_hotword_resolver = offline_inline_hotword_resolver
 
     async def create_session(self, options: StartOptions | None = None) -> LiveASRSession:
         if options and options.hotword_set_id and not self.hotword_resolver:
@@ -333,6 +335,20 @@ class LiveASRService:
                                    hotwords=tuple(word.strip() for word in words), hotword_set_id=options.hotword_set_id,
                                    hotword_set_version=version,
                                    offline_hotwords=tuple(word.strip() for word in offline_words))
+        elif options and options.hotwords and self.offline_inline_hotword_resolver is not None:
+            try:
+                compiled = self.offline_inline_hotword_resolver(list(options.hotwords))
+                if inspect.isawaitable(compiled):
+                    compiled = await compiled
+                if not isinstance(compiled, (list, tuple)) or any(
+                    not isinstance(word, str) or not word.strip() for word in compiled
+                ):
+                    raise ValueError("离线 inline 热词编译结果无效")
+                options = StartOptions(sample_rate=options.sample_rate, format=options.format,
+                                       hotwords=options.hotwords,
+                                       offline_hotwords=tuple(word.strip() for word in compiled))
+            except Exception as exc:
+                raise EngineConfigError(f"离线 inline 热词编译失败: {exc}") from exc
         tracker = LiveSpeakerTracker(vad=self.vad, extractor=self.speaker_extractor,
                                      matcher=self.speaker_matcher, profiles=self.speaker_profiles,
                                      sample_rate=options.sample_rate if options else 16_000,

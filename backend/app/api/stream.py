@@ -112,7 +112,7 @@ async def stream_asr(websocket: WebSocket) -> None:
         if final_service is None:
             return
         try:
-            future: Future[str] = await asyncio.to_thread(final_service.submit, segment)
+            future: Future[str] = final_service.submit(segment)
         except Exception as exc:
             code = "offline_final_queue_full" if isinstance(exc, LiveFinalQueueFull) else "offline_final_unavailable"
             message = "离线定稿队列已满" if code == "offline_final_queue_full" else "离线定稿暂不可用"
@@ -161,6 +161,7 @@ async def stream_asr(websocket: WebSocket) -> None:
 
     worker_task = asyncio.create_task(worker())
     stopped = False
+    session_completed = False
     receive_task: asyncio.Task[Any] | None = None
     try:
         while not stopped:
@@ -171,6 +172,7 @@ async def stream_asr(websocket: WebSocket) -> None:
             if worker_task in done:
                 receive_task.cancel()
                 await worker_task
+                session_completed = True
                 break
             message = await receive_task
             receive_task = None
@@ -203,6 +205,7 @@ async def stream_asr(websocket: WebSocket) -> None:
             if isinstance(control, dict) and control.get("type") == "stop":
                 await audio_queue.put(None)
                 await worker_task
+                session_completed = True
                 stopped = True
             else:
                 await _error(websocket, "protocol_error", "启动后只允许发送二进制 PCM 或 JSON stop", request_id)
@@ -221,7 +224,7 @@ async def stream_asr(websocket: WebSocket) -> None:
             state.active_streams -= 1
         final_service = getattr(state, "live_final_service", None)
         cancel_session = getattr(final_service, "cancel_session", None)
-        if callable(cancel_session):
+        if callable(cancel_session) and not session_completed:
             cancel_session(session.session_id)
         if receive_task is not None and not receive_task.done():
             receive_task.cancel()

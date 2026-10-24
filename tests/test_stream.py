@@ -56,12 +56,14 @@ class FakeRecognizer:
 
 
 def client_for(recognizer, *, queue_size=8, hotword_resolver=None,
-               offline_hotword_resolver=None, live_final_service=None):
+               offline_hotword_resolver=None, offline_inline_hotword_resolver=None,
+               live_final_service=None):
     app = FastAPI()
     app.include_router(router)
     app.state.live_asr_service = LiveASRService(
         recognizer, queue_size=queue_size, hotword_resolver=hotword_resolver,
         offline_hotword_resolver=offline_hotword_resolver,
+        offline_inline_hotword_resolver=offline_inline_hotword_resolver,
     )
     app.state.live_final_service = live_final_service
     return TestClient(app)
@@ -240,12 +242,16 @@ def test_offline_final_revises_same_segment_and_stop_waits():
     class FinalService:
         def __init__(self):
             self.submitted = []
+            self.cancelled = []
 
         def submit(self, segment):
             self.submitted.append(segment)
             future = Future()
             future.set_result("离线修订")
             return future
+
+        def cancel_session(self, session_id):
+            self.cancelled.append(session_id)
 
     final_service = FinalService()
     with client_for(FakeRecognizer(), hotword_resolver=lambda _id: (["online-token"], 4),
@@ -271,6 +277,7 @@ def test_offline_final_revises_same_segment_and_stop_waits():
         assert completed["type"] == "completed"
         assert len(final_service.submitted) == 1
         assert final_service.submitted[0].hotwords == ("offline-token",)
+        assert final_service.cancelled == []
 
 
 def test_offline_final_queue_full_is_visible_without_losing_online_final():
@@ -329,7 +336,34 @@ def test_offline_hotword_compilation_must_use_the_pinned_version():
         assert error["code"] == "model_unavailable"
 
 
-def test_disconnect_cancels_session_final_tasks_and_notifies_worker():
+def test_inline_hotwords_are_compiled_for_offline_model_too():
+    class FinalService:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, segment):
+            self.submitted.append(segment)
+            future = Future()
+            future.set_result("offline")
+            return future
+
+    final_service = FinalService()
+    with client_for(FakeRecognizer(),
+                    offline_inline_hotword_resolver=lambda phrases: ["offline-BPE-token"],
+                    live_final_service=final_service).websocket_connect("/api/v1/stream") as ws:
+        ws.send_json(start_message(hotwords=["项目简称"]))
+        ws.receive_json()
+        ws.send_bytes(b"\x01\x00" * 100)
+        ws.receive_json()
+        ws.send_json({"type": "stop"})
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+    assert len(final_service.submitted) == 1
+    assert final_service.submitted[0].hotwords == ("offline-BPE-token",)
+
+
+def test_disconnect_cancels_session_and_notifies_worker():
     class EndpointRecognizer(FakeRecognizer):
         def is_endpoint(self, stream):
             return bool(stream.samples)
