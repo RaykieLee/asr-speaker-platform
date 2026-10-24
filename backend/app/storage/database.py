@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _JSON_COLUMNS = {
     "speakers": {"metadata"},
     "speaker_samples": {"quality"},
@@ -219,6 +219,11 @@ class SQLiteStore:
                     if self._connection.in_transaction:
                         self._connection.rollback()
                     raise
+                version = 1
+            if version < 2:
+                with self.transaction() as db:
+                    db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON transcription_jobs(status, created_at, id)")
+                    db.execute("PRAGMA user_version = 2")
 
     def _query_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         with self._lock:
@@ -322,6 +327,75 @@ class SQLiteStore:
                        (job_id, file_path, checksum, status, hotword_set_id, hotword_version,
                         json.dumps(options or {}), model_version, now, now))
         return self.get_job(job_id)  # type: ignore[return-value]
+
+    def create_job_if_capacity(self, max_active_jobs: int, *, job_id: str,
+                               file_path: str | None, checksum: str | None,
+                               hotword_set_id: str | None, hotword_version: int | None,
+                               options: Mapping[str, Any],
+                               model_version: str | None) -> dict[str, Any] | None:
+        """Insert a job only if queued+running work remains below the limit."""
+        if max_active_jobs < 1:
+            raise ValueError("max_active_jobs must be positive")
+        now = _now()
+        with self.transaction() as db:
+            count = db.execute(
+                "SELECT COUNT(*) FROM transcription_jobs WHERE status IN ('queued','running')"
+            ).fetchone()[0]
+            if count >= max_active_jobs:
+                return None
+            db.execute("""INSERT INTO transcription_jobs
+                (id,file_path,checksum,status,hotword_set_id,hotword_version,options,model_version,created_at,updated_at)
+                VALUES (?,?,?,'queued',?,?,?,?,?,?)""",
+                       (job_id, file_path, checksum, hotword_set_id, hotword_version,
+                        json.dumps(options), model_version, now, now))
+        return self.get_job(job_id)
+
+    def claim_job(self, job_id: str | None = None) -> dict[str, Any] | None:
+        """Atomically transition one queued row to running and return its snapshot."""
+        now = _now()
+        with self.transaction() as db:
+            if job_id is None:
+                row = db.execute(
+                    "SELECT id FROM transcription_jobs WHERE status='queued' ORDER BY created_at,id LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                job_id = row[0]
+            cursor = db.execute("""UPDATE transcription_jobs
+                SET status='running', progress=0, error_code=NULL, error_message=NULL,
+                    started_at=?, finished_at=NULL, updated_at=?
+                WHERE id=? AND status='queued'""", (now, now, job_id))
+            if cursor.rowcount != 1:
+                return None
+            row = db.execute("SELECT * FROM transcription_jobs WHERE id=?", (job_id,)).fetchone()
+            return self._decode("transcription_jobs", dict(row)) if row is not None else None
+
+    def recover_running_jobs(self) -> int:
+        """Requeue work left running by a worker that exited without finishing."""
+        with self.transaction() as db:
+            cursor = db.execute("""UPDATE transcription_jobs SET status='queued', progress=0,
+                error_code=NULL, error_message=NULL, started_at=NULL, finished_at=NULL, updated_at=?
+                WHERE status='running'""", (_now(),))
+            return cursor.rowcount
+
+    def retry_failed_job_if_capacity(self, job_id: str, max_active_jobs: int) -> str:
+        """Return ``queued``, ``full``, or ``unchanged`` after an atomic retry attempt."""
+        if max_active_jobs < 1:
+            raise ValueError("max_active_jobs must be positive")
+        now = _now()
+        with self.transaction() as db:
+            job = db.execute("SELECT status FROM transcription_jobs WHERE id=?", (job_id,)).fetchone()
+            if job is None or job[0] != "failed":
+                return "unchanged"
+            count = db.execute(
+                "SELECT COUNT(*) FROM transcription_jobs WHERE status IN ('queued','running')"
+            ).fetchone()[0]
+            if count >= max_active_jobs:
+                return "full"
+            db.execute("""UPDATE transcription_jobs SET status='queued',progress=0,
+                error_code=NULL,error_message=NULL,started_at=NULL,finished_at=NULL,updated_at=?
+                WHERE id=? AND status='failed'""", (now, job_id))
+            return "queued"
 
     def update_job(self, job_id: str, *, status: str | None = None, progress: float | None = None,
                    error_code: str | None = None, error_message: str | None = None,

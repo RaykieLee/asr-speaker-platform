@@ -6,6 +6,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
+      ASR_PROCESS_ROLE: api
+      ASR_FILE_WORKER_MODE: external
       ASR_ONLINE_MODEL_DIR: /models/online-small
       ASR_OFFLINE_MODEL_DIR: /models/offline-multi
       ASR_SPEAKER_MODEL_PATH: /models/speaker/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
@@ -24,3 +26,25 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+    depends_on:
+      asr-worker:
+        condition: service_started
+
+  asr-worker:
+    build: .
+    restart: unless-stopped
+    init: true
+    command: ["python", "-m", "backend.app.jobs.process"]
+    environment:
+      ASR_PROCESS_ROLE: worker
+      ASR_FILE_WORKER_MODE: external
+      ASR_OFFLINE_MODEL_DIR: /models/offline-multi
+      ASR_SPEAKER_MODEL_PATH: /models/speaker/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+      ASR_SPEAKER_MODEL_VERSION: 3dspeaker-eres2net-base-zh-cn-v1
+      ASR_DIARIZATION_MODEL_PATH: /models/diarization/model.int8.onnx
+      ASR_DATA_DIR: /data
+    volumes:
+      - ./models/offline-multi:/models/offline-multi:ro
+      - ./models/speaker:/models/speaker:ro
+      - ./models/diarization:/models/diarization:ro
+      - ./data:/data

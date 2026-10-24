@@ -72,23 +72,32 @@ def _resolve_hotword_value(resolved: Any) -> tuple[list[str | list[str]], int]:
 class TranscriptionService:
     """Owns uploaded files, immutable options snapshots and the background worker."""
 
-    def __init__(self, database: SQLiteStore, files: FileStore, asr: FileASRService, *,
+    def __init__(self, database: SQLiteStore, files: FileStore, asr: FileASRService | None, *,
                  hotword_resolver: Callable[[str], Any] | None = None,
                  max_upload_bytes: int = 512 * 1024 * 1024,
-                 max_workers: int = 1, max_pending_jobs: int = 32):
+                 max_workers: int = 1, max_pending_jobs: int = 32,
+                 worker_mode: str = "embedded", model_version: str | None = None):
         if max_upload_bytes < 1:
             raise ValueError("max_upload_bytes must be positive")
         if max_pending_jobs < 1:
             raise ValueError("max_pending_jobs must be positive")
+        if worker_mode not in {"embedded", "external"}:
+            raise ValueError("worker_mode must be embedded or external")
+        if worker_mode == "embedded" and asr is None:
+            raise ValueError("embedded worker mode requires an offline ASR service")
         self.database = database
         self.files = files
         self.asr = asr
+        self.worker_mode = worker_mode
+        self.model_version = model_version or getattr(asr, "model_version", None)
         self.hotword_resolver = hotword_resolver
         self.max_upload_bytes = max_upload_bytes
         self.max_pending_jobs = max_pending_jobs
         self._submit_lock = threading.RLock()
-        self.worker = JobWorker(database, files, asr, max_workers=max_workers)
-        self.worker.start()
+        self.worker = None
+        if worker_mode == "embedded":
+            self.worker = JobWorker(database, files, asr, max_workers=max_workers)
+            self.worker.start()
 
     async def create_job(self, content: bytes, filename: str, *, language: str = "auto",
                          channel_mode: str = "mixdown", hotword_set_id: str | None = None) -> dict[str, Any]:
@@ -131,23 +140,24 @@ class TranscriptionService:
             "hotword_set_version": hotword_version,
             "snapshot_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
-        model_version = self.asr.model_version
+        model_version = self.model_version
         with self._submit_lock:
-            active_count = sum(len(self.database.list_jobs(status=status, limit=self.max_pending_jobs))
-                               for status in ("queued", "running"))
-            if active_count >= self.max_pending_jobs:
-                raise JobQueueFull("文件任务队列已满，请稍后重试")
             self.files.write(relative_path, content)
             try:
-                job = self.database.create_job(
+                job = self.database.create_job_if_capacity(
+                    max_active_jobs=self.max_pending_jobs,
                     job_id=job_id, file_path=relative_path, checksum=checksum,
                     hotword_set_id=hotword_set_id, hotword_version=hotword_version,
                     options=options, model_version=model_version,
                 )
+                if job is None:
+                    self.files.delete(relative_path)
+                    raise JobQueueFull("文件任务队列已满，请稍后重试")
             except Exception:
                 self.files.delete(relative_path)
                 raise
-            self.worker.enqueue(job_id)
+            if self.worker is not None:
+                self.worker.enqueue(job_id)
             return job
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -163,15 +173,13 @@ class TranscriptionService:
 
     def retry_job(self, job_id: str) -> dict[str, Any] | None:
         with self._submit_lock:
-            job = self.database.get_job(job_id)
-            if job is None or job["status"] != "failed":
-                return self.get_job(job_id)
-            active_count = sum(len(self.database.list_jobs(status=status, limit=self.max_pending_jobs))
-                               for status in ("queued", "running"))
-            if active_count >= self.max_pending_jobs:
+            result = self.database.retry_failed_job_if_capacity(job_id, self.max_pending_jobs)
+            if result == "full":
                 raise JobQueueFull("文件任务队列已满，请稍后重试")
-            self.worker.retry(job_id)
+            if result == "queued" and self.worker is not None:
+                self.worker.enqueue(job_id)
             return self.get_job(job_id)
 
     def close(self, *, wait: bool = True) -> None:
-        self.worker.close(wait=wait)
+        if self.worker is not None:
+            self.worker.close(wait=wait)

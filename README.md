@@ -31,11 +31,32 @@ export ASR_DATA_DIR=data
 uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
+默认模式把文件 Worker 嵌入 API 进程，适合单机开发。要让文件识别在独立进程运行，请保持 `ASR_DATA_DIR` 和离线模型路径在两个终端一致，并用以下方式启动 API：
+
+```bash
+export ASR_FILE_WORKER_MODE=external
+uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+```
+
+另开终端启动唯一的文件 Worker：
+
+```bash
+export ASR_FILE_WORKER_MODE=external
+export ASR_DATA_DIR=data
+export ASR_OFFLINE_MODEL_DIR=models/offline-multi
+export ASR_SPEAKER_MODEL_PATH=models/speaker/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+export ASR_SPEAKER_MODEL_VERSION=3dspeaker-eres2net-base-zh-cn-v1
+export ASR_DIARIZATION_MODEL_PATH=models/diarization/model.int8.onnx
+python -m backend.app.jobs.process
+```
+
+外置模式下 API 进程只保存上传文件与任务记录，文件队列上限通过 `ASR_MAX_PENDING_JOBS` 配置；满队列返回 HTTP 429。Worker 从 SQLite 原子认领任务，启动时会将上次异常退出遗留的 `running` 任务重新排队。共享数据目录中的 `file-worker.lock` 保证同一时间只有一个 Worker 处理队列；若锁已被占用，第二个 Worker 会立即退出。实时 WebSocket 仍在 API 进程处理，文件任务使用独立进程中的离线模型。此模式面向单机部署，不提供多机或网络文件系统队列保证。
+
 The version value above labels the selected embedding artifact in stored profiles. Keep it unchanged for those profile vectors; if you replace the model, set a new version and re-enroll profiles. The service stores the SQLite database and uploaded audio under `ASR_DATA_DIR`.
 
 Speaker enrollment uploads are limited to 64 MiB and 120 seconds by default. Override with `ASR_SPEAKER_SAMPLE_MAX_BYTES` (positive integer) and `ASR_SPEAKER_SAMPLE_MAX_DURATION_SECONDS` (positive finite number). The multipart request body also has a hard cap before form parsing, so missing or incorrect `Content-Length` cannot bypass the limit. Oversized files and overlong samples return HTTP 413 before decoding/embedding. WAV duration is checked from its header; other formats require `ffprobe` (installed with FFmpeg) for a pre-decode duration check.
 
-`/health` 是轻量存活检查：进程能响应时返回 200，不检查模型。`/ready` 是就绪检查：在线/离线 ASR、声纹嵌入、离线分段模型及存储初始化全部可用时返回 200，否则返回 503；响应只包含组件布尔状态，不含任务文字或音频。受鉴权保护的 `/api/v1/status` 提供组件可用性、实时连接数和文件任务队列负载摘要。Docker Compose 使用 `/ready` 判断容器就绪；启动/配置模型时可用 `/health` 区分进程存活与模型未就绪。也可打开 [交互式 API 文档](http://127.0.0.1:8000/docs)。
+`/health` 是轻量存活检查：进程能响应时返回 200，不检查模型。`/ready` 是就绪检查：嵌入式模式检查在线/离线 ASR、声纹嵌入、离线分段模型及存储；外置模式还检查独立 Worker 是否持有队列锁。任一必需组件不可用时返回 503；响应只包含组件布尔状态，不含任务文字或音频。受鉴权保护的 `/api/v1/status` 提供组件可用性、实时连接数和文件任务队列负载摘要。Docker Compose 使用 `/ready` 判断容器就绪；启动/配置模型时可用 `/health` 区分进程存活与模型未就绪。也可打开 [交互式 API 文档](http://127.0.0.1:8000/docs)。
 
 ## 网页 Demo
 
@@ -71,7 +92,7 @@ python3.11 models/download.py pyannote-segmentation-3-0
 docker compose up --build
 ```
 
-The compose service mounts model directories read-only and persists state in `./data`. The published port binds to `127.0.0.1:8000` by default. Model weights are not copied into the Docker image. To serve other machines, place the service behind the deployment's authentication and TLS layer and change the host port binding deliberately.
+Compose starts separate `asr` API and `asr-worker` services. Both mount the same `./data` directory; the API keeps the online model for WebSocket requests and queues file uploads, while only the Worker loads the offline recognition and diarization models. The published port binds to `127.0.0.1:8000` by default. Model weights are not copied into the Docker image. To serve other machines, place the service behind the deployment's authentication and TLS layer and change the host port binding deliberately.
 
 本机 SQLite 和音频目录的备份、校验、恢复及 30 天任务原音频清理见 [存储维护说明](backend/app/storage/README.md)。备份中可能包含声纹与录音，应由部署方放在加密且限制访问的位置。
 
