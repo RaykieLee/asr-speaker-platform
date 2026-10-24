@@ -22,10 +22,14 @@ def test_resource_sampler_aggregates_configured_process_trees_without_double_cou
     class FakeProcess:
         def __init__(self, pid, children=()):
             self.pid, self._children = pid, list(children)
+            self._cpu = 0.0
         def children(self, recursive=False):
             return self._children
         def memory_info(self): return SimpleNamespace(rss=self.pid * 100)
-        def cpu_percent(self, interval=None): return float(self.pid)
+        def create_time(self): return float(self.pid)
+        def cpu_times(self):
+            self._cpu += 0.02
+            return SimpleNamespace(user=self._cpu, system=0.0)
         def num_threads(self): return 1
         def memory_full_info(self): return SimpleNamespace(pss=self.pid * 50)
 
@@ -41,21 +45,26 @@ def test_resource_sampler_aggregates_configured_process_trees_without_double_cou
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 
     async def collect_one():
-        sampler = ResourceSampler(10, process_targets=[("api", 10), ("worker", 20)])
+        sampler = ResourceSampler(0.01, process_targets=[("api", 10), ("worker", 20)])
         await sampler.start()
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.035)
         await sampler.stop()
-        return sampler.samples[0]
+        return sampler.samples
 
-    sample = asyncio.run(collect_one())
+    samples = asyncio.run(collect_one())
+    assert len(samples) >= 2
+    sample = samples[0]
     assert sample["scope"] == "process_tree_total"
-    assert sample["cpu_percent"] == 60
+    assert sample["cpu_percent"] is None  # first sample establishes each PID's baseline
     assert sample["rss_bytes"] == 6000
     assert sample["pss_bytes"] == 3000
     assert {row["pid"] for row in sample["processes"]} == {10, 20, 30}
     assert len(sample["processes"]) == 3
     role_by_pid = {row["pid"]: row["role"] for row in sample["processes"]}
     assert role_by_pid == {10: "api", 20: "worker", 30: "worker"}
+    assert all(item["cpu_percent"] > 0 for item in samples[1:])
+    assert all(all(row["cpu_percent"] > 0 for row in item["processes"])
+               for item in samples[1:])
 
 
 def test_resource_process_cli_accepts_multiple_named_roots():
@@ -85,6 +94,50 @@ def test_resource_sampler_marks_aggregate_unavailable_when_a_root_is_missing(mon
     assert sample["rss_bytes"] is None
     assert sample["cpu_percent"] is None
     assert sample["target_errors"][0]["role"] == "worker"
+
+
+def test_resource_sampler_resets_cpu_baseline_for_process_exit_and_reappearance(monkeypatch):
+    class FakeProcess:
+        def __init__(self, pid, created, children=()):
+            self.pid, self.created, self._children = pid, created, list(children)
+            self.cpu = 0.0
+        def children(self, recursive=False): return self._children
+        def create_time(self): return self.created
+        def cpu_times(self):
+            self.cpu += 0.02
+            return SimpleNamespace(user=self.cpu, system=0.0)
+        def memory_info(self): return SimpleNamespace(rss=self.pid * 10)
+        def memory_full_info(self): return SimpleNamespace(pss=self.pid * 5)
+        def num_threads(self): return 1
+
+    worker = FakeProcess(22, 1.0)
+    api = FakeProcess(11, 1.0, [worker])
+    instances = {11: api, 22: worker}
+    fake_psutil = SimpleNamespace(Process=lambda pid: instances[pid],
+                                  NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+                                  AccessDenied=type("AccessDenied", (Exception,), {}))
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    async def collect():
+        sampler = ResourceSampler(0.005, process_targets=[("api", 11)])
+        await sampler.start()
+        await asyncio.sleep(0.015)
+        present_before_exit = len(sampler.samples)
+        api._children = []
+        await asyncio.sleep(0.012)
+        absent_sample_index = len(sampler.samples)
+        api._children = [worker]
+        await asyncio.sleep(0.012)
+        await sampler.stop()
+        return sampler.samples, present_before_exit, absent_sample_index
+
+    samples, before_exit, absent_index = asyncio.run(collect())
+    assert before_exit >= 2 and absent_index > before_exit
+    assert all(22 not in {row["pid"] for row in sample["processes"]}
+               for sample in samples[before_exit:absent_index])
+    reappeared = [row for sample in samples[absent_index:] for row in sample["processes"]
+                  if row["pid"] == 22]
+    assert reappeared and reappeared[0]["cpu_percent"] is None
 
 
 def test_final_speaker_events_deduplicate_by_segment_and_revision_without_exposing_payload():

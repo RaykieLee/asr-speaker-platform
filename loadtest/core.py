@@ -262,6 +262,8 @@ class ResourceSampler:
         if pid is not None and not self.process_targets:
             self.process_targets = [("api", pid)]
         self.samples: list[dict[str, Any]] = []
+        # (process creation time, cumulative user+system CPU seconds, wall time)
+        self._cpu_baselines: dict[int, tuple[float, float, float]] = {}
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         try:
@@ -286,9 +288,11 @@ class ResourceSampler:
         while not self._stop.is_set():
             sampled_at = datetime.now(timezone.utc).isoformat()
             try:
+                sample_monotonic = time.monotonic()
                 targets = self.process_targets or [("loadtest_client", os.getpid())]
                 process_candidates: dict[int, tuple[int, int, str, Any]] = {}
                 target_errors: list[dict[str, Any]] = []
+                cpu_errors: list[dict[str, Any]] = []
                 for root_index, (role, root_pid) in enumerate(targets):
                     try:
                         root = psutil.Process(root_pid)
@@ -312,12 +316,29 @@ class ResourceSampler:
                     except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
                         target_errors.append({"role": role, "pid": root_pid, "error": type(exc).__name__})
                 process_rows: list[dict[str, Any]] = []
+                next_cpu_baselines: dict[int, tuple[float, float, float]] = {}
                 for process_pid, (_distance, _root_index, role, process) in sorted(process_candidates.items()):
                     try:
                         memory = process.memory_info()
+                        cpu_percent: float | None = None
+                        try:
+                            identity = float(process.create_time())
+                            cpu_times = process.cpu_times()
+                            cumulative_cpu = float(cpu_times.user) + float(cpu_times.system)
+                            previous = self._cpu_baselines.get(process_pid)
+                            if (previous is not None and previous[0] == identity
+                                    and sample_monotonic > previous[2]
+                                    and cumulative_cpu >= previous[1]):
+                                cpu_percent = (cumulative_cpu - previous[1]) / (sample_monotonic - previous[2]) * 100
+                            next_cpu_baselines[process_pid] = (identity, cumulative_cpu, sample_monotonic)
+                        except (psutil.NoSuchProcess, AttributeError, psutil.AccessDenied,
+                                OSError, TypeError, ValueError) as exc:
+                            if isinstance(exc, psutil.NoSuchProcess):
+                                raise
+                            cpu_errors.append({"pid": process_pid, "error": type(exc).__name__})
                         row: dict[str, Any] = {
                             "role": role, "pid": process_pid,
-                            "cpu_percent": process.cpu_percent(interval=None), "rss_bytes": memory.rss,
+                            "cpu_percent": cpu_percent, "rss_bytes": memory.rss,
                             "threads": process.num_threads(),
                         }
                         try:
@@ -329,9 +350,12 @@ class ResourceSampler:
                         target_errors.append({"pid": process_pid, "error": "process_unavailable"})
                 if self.process_targets:
                     totals_available = bool(process_rows) and not target_errors
+                    cpu_total_available = totals_available and all(row["cpu_percent"] is not None
+                                                                   for row in process_rows)
                     sample = {
                         "sampled_at": sampled_at, "scope": "process_tree_total",
-                        "cpu_percent": sum(row["cpu_percent"] for row in process_rows) if totals_available else None,
+                        "cpu_percent": (sum(row["cpu_percent"] for row in process_rows)
+                                        if cpu_total_available else None),
                         "rss_bytes": sum(row["rss_bytes"] for row in process_rows) if totals_available else None,
                         "threads": sum(row["threads"] for row in process_rows) if totals_available else None,
                         "pss_bytes": (sum(row["pss_bytes"] for row in process_rows)
@@ -339,6 +363,7 @@ class ResourceSampler:
                                       else None),
                         "processes": process_rows,
                         "target_errors": target_errors,
+                        "cpu_errors": cpu_errors,
                     }
                 else:
                     row = process_rows[0] if process_rows else {}
@@ -346,6 +371,7 @@ class ResourceSampler:
                     sample["system_cpu_percent"] = psutil.cpu_percent(interval=None)
                     sample["system_memory_percent"] = psutil.virtual_memory().percent
                 self.samples.append(sample)
+                self._cpu_baselines = next_cpu_baselines
             except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
                 self.samples.append({"sampled_at": sampled_at, "scope": "process_tree_total",
                                      "error": type(exc).__name__})
