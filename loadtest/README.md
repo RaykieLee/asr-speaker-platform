@@ -24,7 +24,19 @@ python -m loadtest --base-url http://asr-host:8000 \
   --server-pid 12345 --output results/2026-10-23-realtime
 ```
 
-`--repeats` 循环拼接输入 PCM，让录音片段可持续播放到更长时长（例如 60 秒片段重复 10 次约为 10 分钟）。重复音频不等于丰富的业务样本，应记录循环方式并用经授权的代表性音频。`--mode file` 在每个阶梯档并行提交同档数量的文件任务；`--mode mixed` 每档启动指定路数实时连接，并额外用 `--file-concurrency` 个文件任务同时施压。文件任务在 `POST /api/v1/transcriptions` 创建，然后轮询 `GET /api/v1/transcriptions/{job_id}`。实时模式连接 `/api/v1/stream`，发 `start` JSON、按真实时间节奏发送 PCM 二进制帧，再发 `stop`。
+`--repeats` 循环拼接输入 PCM，让录音片段可持续播放到更长时长（例如 60 秒片段重复 10 次约为 10 分钟）。重复音频不等于丰富的业务样本，应记录循环方式并用经授权的代表性音频。默认未指定 `--tier-duration-seconds` 时保留原行为：`--mode file` 在每个阶梯档并行提交同档数量的文件任务；`--mode mixed` 每档启动指定路数实时连接，并额外用 `--file-concurrency` 个文件任务同时施压。
+
+要让文件负载在每档持续运行，例如每个并发档跑 10 分钟：
+
+```bash
+python -m loadtest --wav samples/authorized-mono-16k.wav \
+  --mode file --concurrency 1,2,4 --tier-duration-seconds 600 \
+  --max-file-jobs-per-tier 200 --timeout 1800 --output results/file-10min
+```
+
+持续模式到达时长后不再创建新任务，并等待已提交任务返回终态；每个文件槽只在前一个任务结束后才补交一个任务，因此同时未完成的任务不会超过该档文件并发数。`--max-file-jobs-per-tier` 是每档的硬提交上限，默认 1000，限制报告大小与快速失败时的请求数；若达到上限，档位会提前停止提交，并在 `config.file_jobs_by_concurrency_tier` 记录实际结果数。单个文件任务仍受 `--timeout` 限制。混合模式使用 `--file-concurrency` 个持续文件槽，同时保持该档实时会话发送 PCM；实时音频会重复到档位时长并在时长处截断。`--start-stagger-ms` 可按指定毫秒数错开同一档实时连接的起始时间，默认 0，不改变旧运行方式。持续实时会话对短样本循环重放，样本内容不会自动多样化。
+
+持续模式需要经授权且适合长时间循环的音频；应在报告中记录循环方式。`config` 会写入 `tier_duration_seconds`、`max_file_jobs_per_tier`、`file_jobs_by_concurrency_tier` 和 `start_stagger_ms`。文件任务在 `POST /api/v1/transcriptions` 创建，然后轮询 `GET /api/v1/transcriptions/{job_id}`。实时模式连接 `/api/v1/stream`，发 `start` JSON、按真实时间节奏发送 PCM 二进制帧，再发 `stop`。
 
 鉴权可使用 `--token`，更推荐 `ASR_API_TOKEN` 环境变量。服务端进程资源采集需要本机可访问对应 PID；不传 PID 时 psutil 若可用则采集压测客户端进程及系统 CPU/内存，并在报告中标出作用范围。未安装 psutil 时跳过资源采样；它不会作为强制依赖装入后端。
 

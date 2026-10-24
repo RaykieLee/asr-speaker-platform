@@ -53,16 +53,40 @@ async def pace_pcm(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     on_progress: Callable[[int, float, int], None] | None = None,
+    repeat_count: int = 1,
+    max_audio_seconds: float | None = None,
 ) -> dict[str, float | int]:
     """Send PCM frames against a wall-clock audio timeline and expose client backlog."""
+    if repeat_count < 1:
+        raise ValueError("repeat_count must be positive")
+    if max_audio_seconds is not None and (not math.isfinite(max_audio_seconds) or max_audio_seconds <= 0):
+        raise ValueError("max_audio_seconds must be positive and finite")
+    if not pcm:
+        raise ValueError("PCM must not be empty")
     frame_bytes = pcm_frame_bytes(frame_ms, sample_rate, sample_width)
     frame_seconds = frame_ms / 1000
+    bytes_per_second = sample_rate * sample_width
+    available_bytes = len(pcm) * repeat_count
+    if max_audio_seconds is not None:
+        byte_limit = int(max_audio_seconds * bytes_per_second)
+        byte_limit -= byte_limit % sample_width
+        available_bytes = min(available_bytes, byte_limit)
+        if available_bytes == 0:
+            raise ValueError("max_audio_seconds is shorter than one PCM sample")
     started = clock()
     sent = 0
     max_lag = 0.0
     late_frames = 0
-    for offset in range(0, len(pcm), frame_bytes):
-        frame = pcm[offset : offset + frame_bytes]
+    for offset in range(0, available_bytes, frame_bytes):
+        frame_end = min(available_bytes, offset + frame_bytes)
+        logical_offset = offset
+        frame_parts: list[bytes] = []
+        while logical_offset < frame_end:
+            source_offset = logical_offset % len(pcm)
+            part_end = min(frame_end - logical_offset, len(pcm) - source_offset)
+            frame_parts.append(pcm[source_offset : source_offset + part_end])
+            logical_offset += part_end
+        frame = b"".join(frame_parts)
         target = started + sent * frame_seconds
         delay = target - clock()
         if delay > 0:
@@ -71,7 +95,7 @@ async def pace_pcm(
         sent += 1
         # Compare against the amount of audio actually transmitted, including a
         # short tail frame, rather than assuming every final packet is full.
-        audio_sent = min(len(pcm), offset + len(frame)) / (sample_rate * sample_width)
+        audio_sent = min(available_bytes, offset + len(frame)) / bytes_per_second
         lag = max(0.0, clock() - (started + audio_sent))
         max_lag = max(max_lag, lag)
         if lag >= frame_seconds:
@@ -79,7 +103,7 @@ async def pace_pcm(
         if on_progress is not None:
             on_progress(sent, max_lag, late_frames)
     elapsed = max(0.0, clock() - started)
-    duration = len(pcm) / (sample_rate * sample_width)
+    duration = available_bytes / bytes_per_second
     return {
         "frames_sent": sent,
         "audio_seconds": duration,
