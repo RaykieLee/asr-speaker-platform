@@ -95,6 +95,11 @@
                 <span class="upload-icon">↑</span><strong id="file-prompt">拖入音频文件，或 <u>浏览文件</u></strong>
                 <span id="file-details">支持常见音频格式，最大 512 MB</span>
               </label>
+              <div class="demo-audio-callout">
+                <div><strong>内置双人换人样例 · A / B / A / B</strong><p>来自 AISHELL-3 测试集的完整语音片段（OpenSLR SLR93，Apache 2.0），片段间加入 350 ms 静音。标注边界对应源文件拼接位置，不代表精确语音起止或识别准确率。</p><small>来源：<a href="https://www.openslr.org/93/" target="_blank" rel="noopener noreferrer">OpenSLR</a> · <a href="https://huggingface.co/datasets/AISHELL/AISHELL-3" target="_blank" rel="noopener noreferrer">Hugging Face</a></small></div>
+                <button type="button" class="button button-secondary" id="load-demo-audio">载入双人样例</button>
+              </div>
+              <p id="file-source-state" class="file-source-state" aria-live="polite">选择本机音频，或载入内置双人样例。载入后可沿用下方语言、热词、声道和对比设置。</p>
               <div class="form-row"><label class="select-wrap"><span>语言</span><select id="file-language"><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">English</option></select></label>
                 <label class="select-wrap"><span>热词方案</span><select id="file-hotword"><option value="">不使用热词</option></select></label>
                 <label class="select-wrap"><span>声道处理</span><select id="file-channel-mode"><option value="mixdown">合并声道</option><option value="separate">左右声道分别识别（双麦录音）</option></select></label></div>
