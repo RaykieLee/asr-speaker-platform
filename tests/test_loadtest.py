@@ -31,7 +31,7 @@ def test_resource_sampler_aggregates_configured_process_trees_without_double_cou
 
     worker_child = FakeProcess(30)
     worker = FakeProcess(20, [worker_child])
-    api = FakeProcess(10, [worker, worker_child])
+    api = FakeProcess(10, [worker])
     instances = {10: api, 20: worker, 30: worker_child}
     fake_psutil = SimpleNamespace(
         Process=lambda pid: instances[pid],
@@ -54,6 +54,8 @@ def test_resource_sampler_aggregates_configured_process_trees_without_double_cou
     assert sample["pss_bytes"] == 3000
     assert {row["pid"] for row in sample["processes"]} == {10, 20, 30}
     assert len(sample["processes"]) == 3
+    role_by_pid = {row["pid"]: row["role"] for row in sample["processes"]}
+    assert role_by_pid == {10: "api", 20: "worker", 30: "worker"}
 
 
 def test_resource_process_cli_accepts_multiple_named_roots():

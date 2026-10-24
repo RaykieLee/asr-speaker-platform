@@ -287,18 +287,32 @@ class ResourceSampler:
             sampled_at = datetime.now(timezone.utc).isoformat()
             try:
                 targets = self.process_targets or [("loadtest_client", os.getpid())]
-                processes: dict[int, tuple[str, Any]] = {}
+                process_candidates: dict[int, tuple[int, int, str, Any]] = {}
                 target_errors: list[dict[str, Any]] = []
-                for role, root_pid in targets:
+                for root_index, (role, root_pid) in enumerate(targets):
                     try:
                         root = psutil.Process(root_pid)
-                        processes.setdefault(root.pid, (role, root))
-                        for child in root.children(recursive=True):
-                            processes.setdefault(child.pid, (role, child))
+                        queue = [(root, 0)]
+                        visited: set[int] = set()
+                        while queue:
+                            process, distance = queue.pop(0)
+                            if process.pid in visited:
+                                continue
+                            visited.add(process.pid)
+                            candidate = (distance, root_index, role, process)
+                            existing = process_candidates.get(process.pid)
+                            if existing is None or candidate[:2] < existing[:2]:
+                                process_candidates[process.pid] = candidate
+                            try:
+                                queue.extend((child, distance + 1)
+                                             for child in process.children(recursive=False))
+                            except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+                                target_errors.append({"role": role, "pid": process.pid,
+                                                      "error": type(exc).__name__})
                     except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
                         target_errors.append({"role": role, "pid": root_pid, "error": type(exc).__name__})
                 process_rows: list[dict[str, Any]] = []
-                for process_pid, (role, process) in sorted(processes.items()):
+                for process_pid, (_distance, _root_index, role, process) in sorted(process_candidates.items()):
                     try:
                         memory = process.memory_info()
                         row: dict[str, Any] = {
