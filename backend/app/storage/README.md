@@ -52,3 +52,5 @@ python scripts/storage_maintenance.py cleanup --data-dir data --retention-days 3
 ## 定期运行建议
 
 由部署方通过 cron、launchd 或系统任务调度每日先 dry-run 清理、检查输出，再按策略应用清理；备份按组织的 RPO/RTO 频率执行并异机/异卷加密保存。定期执行 `verify`，并在隔离新目录进行恢复演练。先检查维护命令的 JSON 输出和退出状态，不要将任务音频或备份内容写进公共日志。
+
+存储权限、macOS FileVault 与 Linux LUKS 部署验收见 [SECURITY.md](SECURITY.md)。权限限制不代表静态加密。
