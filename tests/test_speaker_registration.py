@@ -111,6 +111,38 @@ def test_upload_profile_restart_and_sample_delete_reaggregates(tmp_path):
     assert reloaded_profile["sample_count"] == 1
     assert sum(v * v for v in reloaded_profile["embedding"]) == pytest.approx(1.0)
     reopened.close()
+    database = SQLiteStore(tmp_path / "db.sqlite3")
+    database.initialize()
+    service = SpeakerRegistrationService(database, files, TestExtractor())
+    assert service.delete_sample(speaker["id"], second["sample"]["id"])
+    assert database.get_speaker_profile(speaker["id"]) is None
+    assert database.list_samples(speaker["id"]) == []
+    assert not files.exists(second["sample"]["audio_path"])
+    database.close()
+
+
+def test_sample_delete_rebuild_failure_rolls_back_rows_profile_and_audio(tmp_path):
+    database, files, service = setup_service(tmp_path, TestExtractor())
+    speaker = service.create_speaker("事务回滚")
+    first = service.add_sample(speaker["id"], "one.wav", tone())["sample"]
+    second = service.add_sample(speaker["id"], "two.wav", tone())["sample"]
+    third = service.add_sample(speaker["id"], "three.wav", tone())["sample"]
+    profile_before = database.get_speaker_profile(speaker["id"])
+    # Simulate legacy/corrupt data that cannot be safely aggregated.
+    with database.transaction() as db:
+        db.execute("UPDATE speaker_samples SET model_version='incompatible' WHERE id=?",
+                   (third["id"],))
+    stored_second = database.get_sample(second["id"])
+    with pytest.raises(EmbeddingModelVersionError):
+        service.delete_sample(speaker["id"], first["id"])
+    assert database.get_sample(first["id"]) is not None
+    assert database.get_sample(second["id"])["model_version"] == stored_second["model_version"]
+    assert database.get_sample(third["id"])["model_version"] == "incompatible"
+    assert database.get_speaker_profile(speaker["id"]) == profile_before
+    assert files.exists(first["audio_path"])
+    assert files.exists(second["audio_path"])
+    assert files.exists(third["audio_path"])
+    database.close()
 
 
 def test_person_crud_and_delete_cleans_audio(tmp_path):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import struct
 import threading
@@ -68,6 +69,13 @@ class SQLiteStore:
         self.path = Path(database_path)
         if str(database_path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            # The database may contain biometric embeddings and task metadata.
+            # Restrict its directory before SQLite creates sidecar files, then
+            # ensure the primary database itself is private regardless of umask.
+            self.path.parent.chmod(0o700)
+            fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.close(fd)
+            self.path.chmod(0o600)
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(
             str(database_path), timeout=30.0, check_same_thread=False,
@@ -79,6 +87,10 @@ class SQLiteStore:
         if str(database_path) != ":memory:":
             self._connection.execute("PRAGMA journal_mode = WAL")
             self._connection.execute("PRAGMA synchronous = NORMAL")
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{self.path}{suffix}")
+                if sidecar.exists():
+                    sidecar.chmod(0o600)
 
     def close(self) -> None:
         with self._lock:
@@ -283,6 +295,28 @@ class SQLiteStore:
                         json.dumps(quality or {}), model_version, _embedding_blob(embedding), now))
         return self.get_sample(sample_id)  # type: ignore[return-value]
 
+    @staticmethod
+    def insert_sample_in_transaction(db: sqlite3.Connection, speaker_id: str,
+                                     audio_path: str, *, sample_id: str,
+                                     duration_seconds: float | None,
+                                     quality: Mapping[str, Any], model_version: str,
+                                     embedding: Iterable[float]) -> None:
+        """Insert an enrollment row inside a caller-owned atomic profile update."""
+        db.execute("INSERT INTO speaker_samples VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (sample_id, speaker_id, audio_path, duration_seconds,
+                    json.dumps(quality), model_version, _embedding_blob(embedding), _now()))
+
+    @staticmethod
+    def set_speaker_profile_in_transaction(db: sqlite3.Connection, speaker_id: str,
+                                           embedding: Iterable[float], *, sample_count: int,
+                                           model_version: str) -> None:
+        """Upsert a profile using the caller's transaction."""
+        db.execute("""INSERT INTO speaker_profiles VALUES (?, ?, ?, ?, ?)
+                     ON CONFLICT(speaker_id) DO UPDATE SET embedding=excluded.embedding,
+                     sample_count=excluded.sample_count, model_version=excluded.model_version,
+                     updated_at=excluded.updated_at""",
+                   (speaker_id, _embedding_blob(embedding), sample_count, model_version, _now()))
+
     def get_sample(self, sample_id: str) -> dict[str, Any] | None:
         return self._decode("speaker_samples", self._query_one("SELECT * FROM speaker_samples WHERE id=?", (sample_id,)))
 
@@ -299,6 +333,17 @@ class SQLiteStore:
             db.execute("DELETE FROM speaker_samples WHERE id=?", (sample_id,))
             db.execute("DELETE FROM speaker_profiles WHERE speaker_id=?", (sample[0],))
             return True
+
+    def delete_speaker_with_sample_paths(self, speaker_id: str) -> list[str] | None:
+        """Atomically delete a speaker and return the exact sample paths to clean."""
+        with self.transaction() as db:
+            if db.execute("SELECT 1 FROM speakers WHERE id=?", (speaker_id,)).fetchone() is None:
+                return None
+            paths = [row[0] for row in db.execute(
+                "SELECT audio_path FROM speaker_samples WHERE speaker_id=?", (speaker_id,)
+            ).fetchall()]
+            db.execute("DELETE FROM speakers WHERE id=?", (speaker_id,))
+            return paths
 
     def set_speaker_profile(self, speaker_id: str, embedding: Iterable[float] | bytes,
                             *, sample_count: int, model_version: str | None = None) -> dict[str, Any]:

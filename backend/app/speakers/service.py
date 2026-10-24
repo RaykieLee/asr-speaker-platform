@@ -340,15 +340,35 @@ class SpeakerRegistrationService:
         relative_path = f"speakers/{speaker_id}/{sample_id}{suffix}"
         self.files.write(relative_path, data)
         try:
-            sample = self.database.create_sample(
-                speaker_id, relative_path, sample_id=sample_id,
-                duration_seconds=audio.duration, quality=quality,
-                model_version=extractor.model_version, embedding=embedding,
-            )
-            self.database.set_speaker_profile(
-                speaker_id, profile, sample_count=len(all_embeddings),
-                model_version=extractor.model_version,
-            )
+            # Serialize enrollment against deletes and other enrollments. Re-read
+            # inside BEGIN IMMEDIATE so a concurrent profile update cannot be lost.
+            with self.database.transaction() as db:
+                if db.execute("SELECT 1 FROM speakers WHERE id=?", (speaker_id,)).fetchone() is None:
+                    raise SpeakerNotFoundError(speaker_id)
+                current_rows = [self.database._decode("speaker_samples", dict(row))
+                                for row in db.execute(
+                                    "SELECT * FROM speaker_samples WHERE speaker_id=? ORDER BY created_at,id",
+                                    (speaker_id,),
+                                ).fetchall()]
+                versions = {item["model_version"] for item in current_rows}
+                if versions and versions != {extractor.model_version}:
+                    raise EmbeddingModelVersionError("人员样本包含不同声纹模型版本，不能混合聚合")
+                current_embeddings = [item["embedding"] for item in current_rows]
+                if any(item is None for item in current_embeddings):
+                    raise SpeakerError("已有样本缺少向量，无法安全重算人员声纹")
+                if current_embeddings and any(len(item) != len(embedding) for item in current_embeddings):
+                    raise EmbeddingModelVersionError("新旧声纹向量维度不同，不能聚合")
+                latest_profile = aggregate_embeddings([*current_embeddings, embedding])
+                self.database.insert_sample_in_transaction(
+                    db, speaker_id, relative_path, sample_id=sample_id,
+                    duration_seconds=audio.duration, quality=quality,
+                    model_version=extractor.model_version, embedding=embedding,
+                )
+                self.database.set_speaker_profile_in_transaction(
+                    db, speaker_id, latest_profile, sample_count=len(current_embeddings) + 1,
+                    model_version=extractor.model_version,
+                )
+            sample = self.database.get_sample(sample_id)
         except BaseException:
             self.files.delete(relative_path)
             raise
@@ -356,22 +376,42 @@ class SpeakerRegistrationService:
                 "quality": quality, "registration_status": "registered"}
 
     def delete_sample(self, speaker_id: str, sample_id: str) -> bool:
-        sample = self.database.get_sample(sample_id)
-        if sample is None or sample["speaker_id"] != speaker_id:
-            return False
-        deleted = self.storage.delete_sample(sample_id)
-        if not deleted:
-            return False
-        remaining = self.database.list_samples(speaker_id)
-        if not remaining:
-            return True
-        versions = {item["model_version"] for item in remaining}
-        if len(versions) != 1 or None in versions:
-            raise EmbeddingModelVersionError("保留样本模型版本不一致或缺失，无法安全重算人员声纹")
-        embeddings = [item["embedding"] for item in remaining if item["embedding"] is not None]
-        if len(embeddings) != len(remaining):
-            raise SpeakerError("保留样本缺少向量，无法安全重算人员声纹")
-        profile = aggregate_embeddings(embeddings)
-        self.database.set_speaker_profile(speaker_id, profile, sample_count=len(embeddings),
-                                          model_version=next(iter(versions)))
+        # Validate and compute the replacement before changing rows. Holding the
+        # SQLite write lock across this work prevents concurrent enrollment/deletion
+        # from making the profile stale between the read and commit.
+        with self.database.transaction() as db:
+            sample = db.execute(
+                "SELECT speaker_id,audio_path FROM speaker_samples WHERE id=?", (sample_id,)
+            ).fetchone()
+            if sample is None or sample["speaker_id"] != speaker_id:
+                return False
+            retained = [self.database._decode("speaker_samples", dict(row))
+                        for row in db.execute(
+                            "SELECT * FROM speaker_samples WHERE speaker_id=? AND id<>? ORDER BY created_at,id",
+                            (speaker_id, sample_id),
+                        ).fetchall()]
+            profile: list[float] | None = None
+            model_version: str | None = None
+            if retained:
+                versions = {item["model_version"] for item in retained}
+                if len(versions) != 1 or None in versions:
+                    raise EmbeddingModelVersionError(
+                        "保留样本模型版本不一致或缺失，无法安全重算人员声纹"
+                    )
+                embeddings = [item["embedding"] for item in retained]
+                if any(item is None for item in embeddings):
+                    raise SpeakerError("保留样本缺少向量，无法安全重算人员声纹")
+                # aggregate_embeddings checks equal dimensions and finite values.
+                profile = aggregate_embeddings(embeddings)
+                model_version = next(iter(versions))
+            db.execute("DELETE FROM speaker_samples WHERE id=?", (sample_id,))
+            if profile is None:
+                db.execute("DELETE FROM speaker_profiles WHERE speaker_id=?", (speaker_id,))
+            else:
+                self.database.set_speaker_profile_in_transaction(
+                    db, speaker_id, profile, sample_count=len(retained),
+                    model_version=model_version or "",
+                )
+            audio_path = sample["audio_path"]
+        self.storage.cleanup_unreferenced_files([audio_path])
         return True

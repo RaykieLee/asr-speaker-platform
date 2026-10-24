@@ -1,10 +1,25 @@
 """Storage contract tests: migrations, persistence, relationships and file safety."""
 
 from concurrent.futures import ThreadPoolExecutor
+import stat
 
 import pytest
 
 from backend.app.storage import FileStore, SQLiteStore, StorageService, UnsafeStoragePath
+
+
+def test_database_and_wal_files_are_private(tmp_path):
+    parent = tmp_path / "private-data"
+    store = SQLiteStore(parent / "storage.sqlite3")
+    store.initialize()
+    store.create_speaker("private")
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE((parent / "storage.sqlite3").stat().st_mode) == 0o600
+    for suffix in ("-wal", "-shm"):
+        sidecar = parent / f"storage.sqlite3{suffix}"
+        if sidecar.exists():
+            assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+    store.close()
 
 
 def test_migration_is_idempotent_and_persisted_rows_survive_reopen(tmp_path):
