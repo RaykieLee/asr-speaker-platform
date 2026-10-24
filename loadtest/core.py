@@ -131,6 +131,7 @@ class SessionResult:
     websocket_close_reason: str = ""
     first_partial_seconds: float | None = None
     final_text_seconds: float | None = None
+    first_final_segment_seconds: float | None = None
     completion_after_stop_seconds: float | None = None
     speaker_seconds: float | None = None
     final_text: str = ""
@@ -383,7 +384,12 @@ def evaluate_gates(summary: dict[str, Any], thresholds: dict[str, Any]) -> dict[
 
 
 def summarize(results: list[SessionResult]) -> dict[str, Any]:
-    elapsed_values = [item.final_text_seconds for item in results if item.final_text_seconds is not None]
+    elapsed_values = [
+        item.first_final_segment_seconds
+        if item.first_final_segment_seconds is not None else item.final_text_seconds
+        for item in results
+        if item.first_final_segment_seconds is not None or item.final_text_seconds is not None
+    ]
     completion_values = [item.completion_after_stop_seconds for item in results if item.completion_after_stop_seconds is not None]
     partial_values = [item.first_partial_seconds for item in results if item.first_partial_seconds is not None]
     speaker_values = [item.speaker_seconds for item in results if item.speaker_seconds is not None]
@@ -451,6 +457,9 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
         "file_attempted_audio_seconds": sum(item.audio_seconds for item in file_results),
         "latency_seconds": {
             "first_partial": {f"p{p}": percentile(partial_values, p) for p in (50, 95, 99)},
+            "first_final_segment": {f"p{p}": percentile(elapsed_values, p) for p in (50, 95, 99)},
+            # Legacy alias: this is session-start to first final text/segment arrival,
+            # not time relative to the end of the spoken audio.
             "final_text": {f"p{p}": percentile(elapsed_values, p) for p in (50, 95, 99)},
             "completion_after_stop": {f"p{p}": percentile(completion_values, p) for p in (50, 95, 99)},
             "speaker": {f"p{p}": percentile(speaker_values, p) for p in (50, 95, 99)},
@@ -521,6 +530,7 @@ def write_report(
     fieldnames = [
         "run_id", "mode", "session_id", "started_at", "audio_seconds", "frames_sent", "server_dropped_frames",
         "max_client_backlog_seconds", "client_late_frames", "first_partial_seconds", "final_text_seconds",
+        "first_final_segment_seconds",
         "completion_after_stop_seconds",
         "speaker_seconds", "server_error_code", "server_error_message", "websocket_close_code",
         "websocket_close_reason", "concurrency_tier", "final_segment_count", "final_speaker_labeled_segment_count",

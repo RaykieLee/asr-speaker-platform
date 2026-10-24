@@ -504,6 +504,26 @@ def test_summary_counts_errors_and_computes_latency_percentiles():
     assert summary["server_drop_telemetry_coverage"] == {"reported": 0, "sessions": 2}
     assert summary["latency_seconds"]["first_partial"]["p50"] == pytest.approx(0.15)
     assert summary["latency_seconds"]["final_text"]["p50"] == pytest.approx(0.3)
+    assert summary["latency_seconds"]["first_final_segment"]["p50"] == pytest.approx(0.3)
+
+
+def test_first_final_segment_metric_is_named_and_legacy_fields_remain_compatible(tmp_path):
+    item = SessionResult(
+        "named-final", "realtime", completed=True, final_text_seconds=8.0,
+        first_final_segment_seconds=8.0,
+    )
+    summary = summarize([item])
+    assert summary["latency_seconds"]["first_final_segment"]["p50"] == 8.0
+    assert summary["latency_seconds"]["final_text"]["p50"] == 8.0
+    report_json, report_csv = write_report(
+        tmp_path, config={"thresholds": {}}, results=[item], resource_samples=[],
+    )
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["sessions"][0]["first_final_segment_seconds"] == 8.0
+    assert report["sessions"][0]["final_text_seconds"] == 8.0
+    csv_header = report_csv.read_text(encoding="utf-8-sig").splitlines()[0]
+    assert "first_final_segment_seconds" in csv_header
+    assert "final_text_seconds" in csv_header
 
 
 def test_structured_live_diagnostics_are_summarized_and_reported_additively(tmp_path):

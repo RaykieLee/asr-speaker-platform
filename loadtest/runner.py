@@ -223,6 +223,8 @@ async def run_live_session(
                     result.final_text = "".join(
                         part[3] for part in sorted(final_segments.values(), key=lambda value: value[2])
                     )
+                    if result.first_final_segment_seconds is None:
+                        result.first_final_segment_seconds = received
                     if result.final_text_seconds is None:
                         result.final_text_seconds = received
                     speaker = event.get("speaker_name") or event.get("registered_speaker_id") or event.get("local_speaker_id")
@@ -244,6 +246,8 @@ async def run_live_session(
                 if _is_type(event, "final") and str(event.get("type", "")).lower() != "segment":
                     text = str(event.get("text", ""))
                     result.final_text = (result.final_text + text).strip() or text
+                    if result.first_final_segment_seconds is None:
+                        result.first_final_segment_seconds = received
                     if result.final_text_seconds is None:
                         result.final_text_seconds = received
                     speaker = event.get("speaker_name") or event.get("registered_speaker_id") or event.get("local_speaker_id")

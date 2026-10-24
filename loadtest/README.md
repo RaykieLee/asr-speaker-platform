@@ -62,7 +62,7 @@ python -m loadtest.plot results/2026-10-23-realtime/report.json --output results
 
 ## 门槛与容量结论
 
-CLI 默认门槛是待业务确认的初始检查值：错误率 ≤1%、首个 partial P95 ≤2 秒、发送 stop 后至 completed 的 P95 ≤8 秒、客户端积压 ≤0.5 秒、服务端丢帧为 0。用 `--max-error-rate`、`--max-first-partial-p95`、`--max-completion-after-stop-p95`、`--max-backlog`、`--max-server-drops` 修改；旧参数 `--max-final-p95` 仍可用，语义完全相同。报告配置优先写入准确键 `max_completion_after_stop_p95_seconds`，并保留旧键 `max_final_p95_seconds` 以兼容旧报告读取器。门槛检查的是发送 `stop` 到收到 `completed` 的 P95，不是首个最终文字延迟。`final_text` 延迟从会话开始计时，包含音频播放时长，仅供诊断，不受这个 8 秒门槛检查。门槛随配置写入报告；命令在任一可判定门槛失败时返回非零状态。缺少观测值时显示 `not_evaluable`，不当作门槛已通过，也不推断容量。
+CLI 默认门槛是待业务确认的初始检查值：错误率 ≤1%、首个 partial P95 ≤2 秒、发送 stop 后至 completed 的 P95 ≤8 秒、客户端积压 ≤0.5 秒、服务端丢帧为 0。用 `--max-error-rate`、`--max-first-partial-p95`、`--max-completion-after-stop-p95`、`--max-backlog`、`--max-server-drops` 修改；旧参数 `--max-final-p95` 仍可用，语义完全相同。报告配置优先写入准确键 `max_completion_after_stop_p95_seconds`，并保留旧键 `max_final_p95_seconds` 以兼容旧报告读取器。门槛检查的是发送 `stop` 到收到 `completed` 的 P95。`first_final_segment_seconds` 表示首个 final 片段从会话开始到达所需时间，包含音频播放时长，仅供诊断，不是音频结束后的识别延迟，也不受 8 秒门槛检查；JSON 中旧 `final_text_seconds` 和摘要 `latency_seconds.final_text` 是同一指标的兼容别名。图表以“首个 final 片段到达（会话开始后）”标注。门槛随配置写入报告；命令在任一可判定门槛失败时返回非零状态。缺少观测值时显示 `not_evaluable`，不当作门槛已通过，也不推断容量。
 
 “稳定处理 N 路”需要在最终部署机器、业务认可的音频和热词/声纹组合上复测：预热模型后每档至少稳定运行 10 分钟；接近瓶颈时缩小并发步长；连续长稳负载观察内存增长。成功率、延迟、丢帧和资源持续增长均需满足预先约定的门槛。目标机 CPU 型号/核心数、内存、GPU/显存、OS、模型文件版本、推理线程数、Worker 数、热词数、音频样本特征、门槛和完整报告应一起归档。开发机报告不是生产容量依据。本工具不会声称当前机器已测出容量。
 

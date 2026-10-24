@@ -155,7 +155,7 @@ def _success_rate(sessions: list[dict[str, Any]]) -> float | None:
 
 _LATENCIES = (
     ("首个 partial", "first_partial_seconds"),
-    ("最终文字", "final_text_seconds"),
+    ("首个 final 片段到达（会话开始后）", "first_final_segment_seconds"),
     ("stop 后完成", "completion_after_stop_seconds"),
     ("文件排队", "queue_seconds"),
     ("文件处理", "processing_seconds"),
@@ -191,8 +191,16 @@ def _tier_chart(groups: list[tuple[str, str, list[dict[str, Any]]]]) -> str:
 
 
 def _latency_chart(groups: list[tuple[str, str, list[dict[str, Any]]]]) -> str:
+    def metric_value(session: dict[str, Any], key: str) -> float | None:
+        value = session.get(key)
+        if key == "first_final_segment_seconds" and value is None:
+            # Read legacy reports, whose final_text_seconds has the same
+            # session-start-to-first-final-event meaning.
+            value = session.get("final_text_seconds")
+        return _number(value)
+
     chart_groups = [(tier, mode, sessions, [(label, key, _percentile([value for session in sessions
-                     if (value := _number(session.get(key))) is not None], 95))
+                     if (value := metric_value(session, key)) is not None], 95))
                      for label, key in _P95_LATENCIES]) for tier, mode, sessions in groups]
     values = [value for _, _, _, metrics in chart_groups for _, _, value in metrics if value is not None]
     width, left, right = 1000, 230, 95
@@ -228,13 +236,19 @@ def _latency_chart(groups: list[tuple[str, str, list[dict[str, Any]]]]) -> str:
 
 
 def _metrics_table(groups: list[tuple[str, str, list[dict[str, Any]]]]) -> str:
+    def metric_value(session: dict[str, Any], key: str) -> float | None:
+        value = session.get(key)
+        if key == "first_final_segment_seconds" and value is None:
+            value = session.get("final_text_seconds")
+        return _number(value)
+
     rows = []
     for tier, mode, sessions in groups:
         success = _success_rate(sessions)
         count = len(sessions)
         cells = [f"{success*100:.1f}%" if success is not None else "不可评估"]
         for _, key in _LATENCIES:
-            values = [value for session in sessions if (value := _number(session.get(key))) is not None]
+            values = [value for session in sessions if (value := metric_value(session, key)) is not None]
             p50, p95 = _percentile(values, 50), _percentile(values, 95)
             cells.append(f"P50 {p50:.3f} / P95 {p95:.3f}" if p50 is not None and p95 is not None else "不可评估")
         rows.append(f'<tr><th>{_esc(tier)} 路 · {_esc(mode)}</th><td>{count if count else "不可评估"}</td>' +
@@ -262,7 +276,7 @@ def render_html(report: dict[str, Any], source_name: str = "report.json") -> str
 </style></head><body><main><h1>负载测试报告图表</h1><p class="meta">来源：{_esc(source_name)} · 模式：{_esc(config.get('mode') or '未记录')} · 并发档位：{_esc(config_levels)} · 资源范围：{_esc(scope)}</p>
 <section class="card"><h2>服务资源随时间变化</h2><div class="chart-grid">{resource_cpu}{resource_rss}</div><p class="note">只绘制报告中有时间戳且有数值的采样点；缺失资源数据会显示为不可评估，不会补零。</p></section>
 <section class="card"><h2>并发档位表现</h2>{_tier_chart(groups)}{_latency_chart(groups)}{_metrics_table(groups)}</section>
-<section class="card note"><strong>指标口径</strong><p>成功率按各并发档位与负载模式内的会话数计算；成功表示 <code>completed=true</code> 且无错误。延迟显示可用样本的线性插值 P50/P95。报告未提供的指标会标为不可评估。图表不会展示会话的原始转写文本。</p></section></main></body></html>'''
+<section class="card note"><strong>指标口径</strong><p>成功率按各并发档位与负载模式内的会话数计算；成功表示 <code>completed=true</code> 且无错误。延迟显示可用样本的线性插值 P50/P95。首个 final 片段到达时间从会话开始计时，包含音频播放时长；它不表示音频结束后的识别延迟。报告未提供的指标会标为不可评估。图表不会展示会话的原始转写文本。</p></section></main></body></html>'''
 
 
 def plot_report(input_path: Path, output_path: Path | None = None) -> Path:

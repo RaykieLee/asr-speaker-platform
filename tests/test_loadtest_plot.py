@@ -16,7 +16,8 @@ def example_report():
         ],
         "sessions": [
             {"run_id": "c1-a1-live-1", "mode": "realtime", "completed": True, "error": "",
-             "first_partial_seconds": 0.5, "completion_after_stop_seconds": 1.2,
+             "first_partial_seconds": 0.5, "first_final_segment_seconds": 1.4,
+             "completion_after_stop_seconds": 1.2,
              "final_text": "PRIVATE_TRANSCRIPT_NEVER_RENDER", "queue_seconds": None},
             {"run_id": "c2-a1-live-1", "mode": "realtime", "completed": False, "error": "TimeoutError: test",
              "first_partial_seconds": None, "completion_after_stop_seconds": None},
@@ -36,6 +37,8 @@ def test_render_has_offline_cpu_memory_and_concurrency_charts_without_transcript
     assert 'RSS 常驻内存' in html
     assert '成功率（按并发档位和模式）' in html
     assert '关键指标 P95' in html
+    assert '首个 final 片段到达（会话开始后）' in html
+    assert '不表示音频结束后的识别延迟' in html
     assert '50.0%' in html
     assert html.count('<polyline') == 2  # both resource curves break at the missing sample
     assert html.count('<circle') == 6  # markers show measured points; no curve crosses the missing sample
@@ -55,6 +58,18 @@ def test_missing_resource_and_latency_values_are_not_drawn_as_zero():
     assert html.count('不可评估') >= 8
     assert '不可评估：没有可用采样数据' in html
     assert '成功率（按并发档位和模式）' in html
+
+
+def test_chart_reads_legacy_final_text_timing_under_explicit_label():
+    report = {
+        "config": {"concurrency_levels": [1], "mode": "realtime"},
+        "resource_samples": [],
+        "sessions": [{"run_id": "c1-legacy-live", "mode": "realtime", "completed": True,
+                      "final_text_seconds": 12.5}],
+    }
+    html = render_html(report)
+    assert '首个 final 片段到达（会话开始后）' in html
+    assert '>12.500</text>' in html
 
 
 def test_plot_report_writes_standalone_html(tmp_path):
