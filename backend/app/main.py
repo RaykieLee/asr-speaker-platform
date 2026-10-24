@@ -22,6 +22,7 @@ from backend.app.hotwords.compiler import HotwordCompiler
 from backend.app.hotwords.model_tokenizer import load_vocabulary, mixed_cjk_bpe_tokenizer
 from backend.app.hotwords.service import HotwordService
 from backend.app.jobs.service import TranscriptionService
+from backend.app.jobs.worker import FileWorkerLock
 from backend.app.pipelines.file_asr import FileASRService
 from backend.app.pipelines.live_asr import LiveASRService
 from backend.app.speakers.service import (
@@ -102,6 +103,17 @@ def _speaker_profiles(database: SQLiteStore) -> list[dict]:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     application.state.initialization_complete = False
+    process_role = os.environ.get("ASR_PROCESS_ROLE", "api").strip().lower()
+    configured_worker_mode = os.environ.get("ASR_FILE_WORKER_MODE", "embedded").strip().lower()
+    if process_role not in {"api", "worker"}:
+        raise EngineConfigError("ASR_PROCESS_ROLE 必须是 api 或 worker")
+    if configured_worker_mode not in {"embedded", "external"}:
+        raise EngineConfigError("ASR_FILE_WORKER_MODE 必须是 embedded 或 external")
+    if process_role == "worker" and configured_worker_mode != "external":
+        raise EngineConfigError("独立 Worker 进程要求 ASR_FILE_WORKER_MODE=external")
+    external_api = process_role == "api" and configured_worker_mode == "external"
+    worker_process = process_role == "worker"
+    worker_mode = "external" if external_api or worker_process else "embedded"
     data_dir = Path(os.environ.get("ASR_DATA_DIR", "data")).expanduser()
     database = SQLiteStore(data_dir / "platform.sqlite3")
     database.initialize()
@@ -115,6 +127,7 @@ async def lifespan(application: FastAPI):
         application.state.live_asr_service = None
         application.state.hotword_service = None
         application.state.transcription_service = None
+        application.state.file_worker_mode = worker_mode
         extractor = None
         model_path = os.environ.get("ASR_SPEAKER_MODEL_PATH")
         if model_path:
@@ -131,7 +144,7 @@ async def lifespan(application: FastAPI):
         )
 
         online_dir = os.environ.get("ASR_ONLINE_MODEL_DIR")
-        if online_dir:
+        if online_dir and not worker_process:
             directory = Path(online_dir)
             model_files, vocab, bpe_model = _asr_paths(directory, online=True)
             model = ModelArtifact("online-transducer", "transducer", directory.name,
@@ -157,37 +170,51 @@ async def lifespan(application: FastAPI):
         if offline_dir:
             directory = Path(offline_dir)
             model_files, vocab, bpe_model = _asr_paths(directory, online=False)
-            model = ModelArtifact("offline-transducer", "transducer", directory.name,
-                                  tuple(model_files.__dict__.values()))
-            recognizer = SherpaOfflineRecognizer.load(
-                model, model_files, modeling_unit="cjkchar+bpe", bpe_vocab=vocab,
-                num_threads=int(os.environ.get("ASR_OFFLINE_THREADS", "2")),
-            )
             offline_hotwords = _hotword_service(database, directory, mode="offline", bpe_model=bpe_model)
-            if not online_dir:
+            if not online_dir or worker_process:
                 application.state.hotword_service = offline_hotwords
-            diarization_path = os.environ.get("ASR_DIARIZATION_MODEL_PATH")
-            if diarization_path and not model_path:
-                raise EngineConfigError("配置离线说话人分段时还需要 ASR_SPEAKER_MODEL_PATH")
-            diarizer = SherpaOfflineDiarizer.load(
-                diarization_path, model_path,
-                num_threads=int(os.environ.get("ASR_DIARIZATION_THREADS", "2")),
-                num_speakers=int(os.environ.get("ASR_DIARIZATION_NUM_SPEAKERS", "-1")),
-            ) if diarization_path and model_path else None
-            speaker_matcher = SpeakerMatcher(
-                database, extractor,
-                min_similarity=float(os.environ.get("ASR_FILE_SPEAKER_MIN_SIMILARITY", "0.55")),
-                min_margin=float(os.environ.get("ASR_FILE_SPEAKER_MIN_MARGIN", "0.05")),
-                min_segment_seconds=float(os.environ.get("ASR_FILE_SPEAKER_MIN_SEGMENT_SECONDS", "1.0")),
-            ) if diarizer is not None and extractor is not None else None
+            file_asr = None
+            if worker_process or not external_api:
+                model = ModelArtifact("offline-transducer", "transducer", directory.name,
+                                      tuple(model_files.__dict__.values()))
+                recognizer = SherpaOfflineRecognizer.load(
+                    model, model_files, modeling_unit="cjkchar+bpe", bpe_vocab=vocab,
+                    num_threads=int(os.environ.get("ASR_OFFLINE_THREADS", "2")),
+                )
+                diarization_path = os.environ.get("ASR_DIARIZATION_MODEL_PATH")
+                if diarization_path and not model_path:
+                    raise EngineConfigError("配置离线说话人分段时还需要 ASR_SPEAKER_MODEL_PATH")
+                diarizer = SherpaOfflineDiarizer.load(
+                    diarization_path, model_path,
+                    num_threads=int(os.environ.get("ASR_DIARIZATION_THREADS", "2")),
+                    num_speakers=int(os.environ.get("ASR_DIARIZATION_NUM_SPEAKERS", "-1")),
+                ) if diarization_path and model_path else None
+                speaker_matcher = SpeakerMatcher(
+                    database, extractor,
+                    min_similarity=float(os.environ.get("ASR_FILE_SPEAKER_MIN_SIMILARITY", "0.55")),
+                    min_margin=float(os.environ.get("ASR_FILE_SPEAKER_MIN_MARGIN", "0.05")),
+                    min_segment_seconds=float(os.environ.get("ASR_FILE_SPEAKER_MIN_SEGMENT_SECONDS", "1.0")),
+                ) if diarizer is not None and extractor is not None else None
+                file_asr = FileASRService(recognizer, diarizer=diarizer,
+                                          speaker_matcher=speaker_matcher)
             application.state.transcription_service = TranscriptionService(
-                database, files, FileASRService(recognizer, diarizer=diarizer,
-                                               speaker_matcher=speaker_matcher),
+                database, files, file_asr,
                 hotword_resolver=lambda set_id: offline_hotwords.resolve(set_id, mode="offline"),
                 max_workers=int(os.environ.get("ASR_FILE_WORKERS", "1")),
                 max_upload_bytes=int(os.environ.get("ASR_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))),
                 max_pending_jobs=int(os.environ.get("ASR_MAX_PENDING_JOBS", "32")),
+                worker_mode=worker_mode, model_version=directory.name,
             )
+        elif external_api:
+            application.state.transcription_service = TranscriptionService(
+                database, files, None,
+                max_upload_bytes=int(os.environ.get("ASR_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))),
+                max_pending_jobs=int(os.environ.get("ASR_MAX_PENDING_JOBS", "32")),
+                worker_mode="external",
+                model_version=os.environ.get("ASR_OFFLINE_MODEL_VERSION"),
+            )
+        elif worker_process:
+            raise EngineConfigError("独立文件 Worker 需要配置 ASR_OFFLINE_MODEL_DIR")
         application.state.initialization_complete = True
         yield
     finally:
@@ -236,8 +263,16 @@ def _readiness_snapshot(state) -> dict:
         "offline_asr": transcription is not None,
         "speaker_embedding": registration is not None and getattr(registration, "extractor", None) is not None,
         "file_diarization": transcription is not None and
-        getattr(getattr(transcription, "asr", None), "diarizer", None) is not None,
+        (getattr(transcription, "worker_mode", "embedded") == "external" or
+         getattr(getattr(transcription, "asr", None), "diarizer", None) is not None),
     }
+    if getattr(state, "file_worker_mode", "embedded") == "external":
+        database_path = getattr(database, "path", None)
+        worker_lock_path = database_path.parent / "file-worker.lock" if isinstance(database_path, Path) else None
+        try:
+            checks["file_worker"] = worker_lock_path is not None and FileWorkerLock.is_locked(worker_lock_path)
+        except OSError:
+            checks["file_worker"] = False
     return {
         "status": "ready" if all(checks.values()) else "not_ready",
         "checks": checks,
@@ -330,7 +365,8 @@ def service_status(request: Request) -> dict:
         "offline_asr": transcription is not None,
         "speaker_embedding": registration is not None and getattr(registration, "extractor", None) is not None,
         "file_diarization": transcription is not None and
-        getattr(getattr(transcription, "asr", None), "diarizer", None) is not None,
+        (getattr(transcription, "worker_mode", "embedded") == "external" or
+         getattr(getattr(transcription, "asr", None), "diarizer", None) is not None),
         "active_streams": getattr(state, "active_streams", 0),
         "max_streams": getattr(state, "max_streams", None),
         "file_queue": _file_queue_snapshot(transcription),
