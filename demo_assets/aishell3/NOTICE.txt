@@ -1,0 +1,28 @@
+AISHELL-3 Mandarin speech and transcripts
+
+Source corpus: AISHELL-3, provided by Beijing Shell Shell Technology Co., Ltd.
+Official OpenSLR resource page: https://www.openslr.org/93/
+Official small-file dataset mirror: https://huggingface.co/datasets/AISHELL/AISHELL-3
+Selected source revision: f20d5db4a31fe779ef07bb1af4ea92da5c786622
+License stated by OpenSLR and the Hugging Face dataset card: Apache License 2.0.
+The Apache License 2.0 text is included as LICENSE-Apache-2.0.txt.
+
+Citation:
+Yao Shi, Hui Bu, Xin Xu, Shaoji Zhang, Ming Li. “AISHELL-3: A Multi-speaker
+Mandarin TTS Corpus and the Baselines.” https://arxiv.org/abs/2010.11567
+
+This demo contains eight selected test utterances from two distinct AISHELL-3
+speaker folders, with their source character/pinyin transcript lines recorded
+in source_selection.json and manifest.json. The enrollment WAVs concatenate two
+complete utterances from one speaker each. The two-speaker-abab.wav file
+concatenates four complete utterances in A/B/A/B order. Preparation inserts
+350 ms of zero-valued PCM silence between clips; it does not crop, resample,
+change channels, filter, or change gain. The generated files are derived audio
+and the exact input IDs, transcript text, source URLs, segment intervals, and
+SHA-256 digests are recorded in manifest.json.
+
+AISHELL-3 was released as a multi-speaker Mandarin corpus. The aliases A and B
+are demo labels for the selected dataset speaker folders; this package does not
+claim to identify the people who recorded them or to establish diarization
+accuracy. No additional upstream NOTICE file was present in the selected
+Hugging Face dataset root at the pinned revision.
