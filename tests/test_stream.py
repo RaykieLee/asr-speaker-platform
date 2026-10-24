@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import Future
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -54,12 +55,15 @@ class FakeRecognizer:
         return False
 
 
-def client_for(recognizer, *, queue_size=8, hotword_resolver=None):
+def client_for(recognizer, *, queue_size=8, hotword_resolver=None,
+               offline_hotword_resolver=None, live_final_service=None):
     app = FastAPI()
     app.include_router(router)
     app.state.live_asr_service = LiveASRService(
-        recognizer, queue_size=queue_size, hotword_resolver=hotword_resolver
+        recognizer, queue_size=queue_size, hotword_resolver=hotword_resolver,
+        offline_hotword_resolver=offline_hotword_resolver,
     )
+    app.state.live_final_service = live_final_service
     return TestClient(app)
 
 
@@ -84,6 +88,16 @@ def test_odd_pcm_payload_is_rejected_explicitly():
         error = ws.receive_json()
         assert error["type"] == "error"
         assert error["code"] == "invalid_audio"
+
+
+def test_live_pcm_frame_size_is_bounded_before_audio_queueing():
+    from backend.app.api.stream import MAX_PCM_FRAME_BYTES
+    with client_for(FakeRecognizer()).websocket_connect("/api/v1/stream") as ws:
+        ws.send_json(start_message())
+        ws.receive_json()
+        ws.send_bytes(b"\x00" * (MAX_PCM_FRAME_BYTES + 1))
+        error = ws.receive_json()
+        assert error["code"] == "audio_frame_too_large"
 
 
 def test_missing_model_service_does_not_return_fake_transcript():
@@ -220,3 +234,125 @@ def test_inference_failure_is_structured_error():
         assert error["type"] == "error"
         assert error["code"] == "recognition_error"
         assert "推理失败" in error["message"]
+
+
+def test_offline_final_revises_same_segment_and_stop_waits():
+    class FinalService:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, segment):
+            self.submitted.append(segment)
+            future = Future()
+            future.set_result("离线修订")
+            return future
+
+    final_service = FinalService()
+    with client_for(FakeRecognizer(), hotword_resolver=lambda _id: (["online-token"], 4),
+                    offline_hotword_resolver=lambda _id, version: (["offline-token"], version),
+                    live_final_service=final_service).websocket_connect(
+        "/api/v1/stream"
+    ) as ws:
+        ws.send_json(start_message(hotword_set_id="set-a"))
+        started = ws.receive_json()
+        assert started["offline_finalization"] is True
+        ws.send_bytes(b"\x01\x00" * 100)
+        partial = ws.receive_json()
+        ws.send_json({"type": "stop"})
+        online_final = ws.receive_json()
+        offline_final = ws.receive_json()
+        completed = ws.receive_json()
+        assert partial["status"] == "partial"
+        assert online_final["status"] == "final"
+        assert offline_final["status"] == "final"
+        assert offline_final["text"] == "离线修订"
+        assert offline_final["segment_id"] == online_final["segment_id"] == 1
+        assert offline_final["revision"] > online_final["revision"]
+        assert completed["type"] == "completed"
+        assert len(final_service.submitted) == 1
+        assert final_service.submitted[0].hotwords == ("offline-token",)
+
+
+def test_offline_final_queue_full_is_visible_without_losing_online_final():
+    class FullQueue:
+        def submit(self, _segment):
+            from backend.app.pipelines.live_final import LiveFinalQueueFull
+            raise LiveFinalQueueFull("internal message must not leak")
+
+    with client_for(FakeRecognizer(), live_final_service=FullQueue()).websocket_connect(
+        "/api/v1/stream"
+    ) as ws:
+        ws.send_json(start_message())
+        ws.receive_json()
+        ws.send_bytes(b"\x01\x00" * 100)
+        ws.receive_json()
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["status"] == "final"
+        error = ws.receive_json()
+        completed = ws.receive_json()
+        assert error["code"] == "offline_final_queue_full"
+        assert "internal" not in error["message"]
+        assert completed["type"] == "completed"
+
+
+def test_offline_final_recognition_failure_is_visible():
+    class FailingFinalService:
+        def submit(self, _segment):
+            future = Future()
+            future.set_exception(RuntimeError("private subprocess detail"))
+            return future
+
+    with client_for(FakeRecognizer(), live_final_service=FailingFinalService()).websocket_connect(
+        "/api/v1/stream"
+    ) as ws:
+        ws.send_json(start_message())
+        ws.receive_json()
+        ws.send_bytes(b"\x01\x00" * 100)
+        ws.receive_json()
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["status"] == "final"
+        error = ws.receive_json()
+        completed = ws.receive_json()
+        assert error["code"] == "offline_final_failed"
+        assert "private" not in error["message"]
+        assert completed["type"] == "completed"
+
+
+def test_offline_hotword_compilation_must_use_the_pinned_version():
+    with client_for(FakeRecognizer(), hotword_resolver=lambda _id: (["online"], 3),
+                    offline_hotword_resolver=lambda _id, version: (["offline"], version + 1)).websocket_connect(
+        "/api/v1/stream"
+    ) as ws:
+        ws.send_json(start_message(hotword_set_id="set-a"))
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "model_unavailable"
+
+
+def test_disconnect_cancels_session_final_tasks_and_notifies_worker():
+    class EndpointRecognizer(FakeRecognizer):
+        def is_endpoint(self, stream):
+            return bool(stream.samples)
+
+    class PendingFinalService:
+        def __init__(self):
+            self.cancelled = []
+
+        def submit(self, _segment):
+            future = Future()
+            future.set_result("offline")
+            return future
+
+        def cancel_session(self, session_id):
+            self.cancelled.append(session_id)
+
+    final_service = PendingFinalService()
+    with client_for(EndpointRecognizer(), live_final_service=final_service).websocket_connect(
+        "/api/v1/stream"
+    ) as ws:
+        ws.send_json(start_message())
+        started = ws.receive_json()
+        ws.send_bytes(b"\x01\x00" * 100)
+        assert ws.receive_json()["status"] == "final"
+        assert ws.receive_json()["text"] == "offline"
+    assert final_service.cancelled == [started["session_id"]]

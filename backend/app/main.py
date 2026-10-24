@@ -25,6 +25,7 @@ from backend.app.jobs.service import TranscriptionService
 from backend.app.jobs.worker import FileWorkerLock
 from backend.app.pipelines.file_asr import FileASRService
 from backend.app.pipelines.live_asr import LiveASRService
+from backend.app.pipelines.live_final import LiveFinalProcess
 from backend.app.speakers.service import (
     SherpaSpeakerEmbeddingAdapter,
     SpeakerModel,
@@ -89,6 +90,16 @@ def _resolved_stream_words(service: HotwordService, set_id: str) -> tuple[list[s
     return words, snapshot.version
 
 
+def _resolved_offline_stream_words(service: HotwordService | None, set_id: str,
+                                   version: int) -> tuple[list[str], int]:
+    if service is None:
+        return [], version
+    snapshot = service.resolve(set_id, version=version, mode="offline")
+    compiled = snapshot.as_dict()["compiled"]
+    words = [" ".join(entry["tokens"]) for entry in compiled["entries"]]
+    return words, snapshot.version
+
+
 def _speaker_profiles(database: SQLiteStore) -> list[dict]:
     profiles = []
     for speaker in database.list_speakers(status="active"):
@@ -125,6 +136,8 @@ async def lifespan(application: FastAPI):
         if application.state.max_streams < 1:
             raise EngineConfigError("ASR_MAX_STREAMS 必须为正整数")
         application.state.live_asr_service = None
+        application.state.live_final_service = None
+        application.state.offline_hotword_service = None
         application.state.hotword_service = None
         application.state.transcription_service = None
         application.state.file_worker_mode = worker_mode
@@ -157,6 +170,8 @@ async def lifespan(application: FastAPI):
             application.state.hotword_service = online_hotwords
             application.state.live_asr_service = LiveASRService(
                 recognizer, hotword_resolver=lambda set_id: _resolved_stream_words(online_hotwords, set_id),
+                offline_hotword_resolver=lambda set_id, version: _resolved_offline_stream_words(
+                    application.state.offline_hotword_service, set_id, version),
                 vad=EnergyVAD() if extractor is not None else None,
                 speaker_extractor=extractor,
                 speaker_matcher=profile_cosine_matcher(
@@ -171,6 +186,14 @@ async def lifespan(application: FastAPI):
             directory = Path(offline_dir)
             model_files, vocab, bpe_model = _asr_paths(directory, online=False)
             offline_hotwords = _hotword_service(database, directory, mode="offline", bpe_model=bpe_model)
+            application.state.offline_hotword_service = offline_hotwords
+            if online_dir and not worker_process:
+                application.state.live_final_service = LiveFinalProcess({
+                    "encoder": str(model_files.encoder), "decoder": str(model_files.decoder),
+                    "joiner": str(model_files.joiner), "tokens": str(model_files.tokens),
+                    "version": directory.name, "num_threads": int(os.environ.get("ASR_OFFLINE_THREADS", "2")),
+                    "bpe_vocab": str(vocab),
+                }, queue_size=int(os.environ.get("ASR_LIVE_FINAL_QUEUE_SIZE", "16")))
             if not online_dir or worker_process:
                 application.state.hotword_service = offline_hotwords
             file_asr = None
@@ -222,6 +245,9 @@ async def lifespan(application: FastAPI):
         service = getattr(application.state, "transcription_service", None)
         if service is not None:
             service.close()
+        live_final_service = getattr(application.state, "live_final_service", None)
+        if live_final_service is not None:
+            live_final_service.close()
         database.close()
 
 app = FastAPI(
@@ -265,6 +291,10 @@ def _readiness_snapshot(state) -> dict:
         "file_diarization": transcription is not None and
         (getattr(transcription, "worker_mode", "embedded") == "external" or
          getattr(getattr(transcription, "asr", None), "diarizer", None) is not None),
+        "live_offline_finalization": (
+            getattr(state, "live_asr_service", None) is None or
+            bool(getattr(getattr(state, "live_final_service", None), "available", False))
+        ),
     }
     if getattr(state, "file_worker_mode", "embedded") == "external":
         database_path = getattr(database, "path", None)
@@ -367,6 +397,10 @@ def service_status(request: Request) -> dict:
         "file_diarization": transcription is not None and
         (getattr(transcription, "worker_mode", "embedded") == "external" or
          getattr(getattr(transcription, "asr", None), "diarizer", None) is not None),
+        "live_offline_finalization": (
+            getattr(state, "live_asr_service", None) is None or
+            bool(getattr(getattr(state, "live_final_service", None), "available", False))
+        ),
         "active_streams": getattr(state, "active_streams", 0),
         "max_streams": getattr(state, "max_streams", None),
         "file_queue": _file_queue_snapshot(transcription),

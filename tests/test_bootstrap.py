@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from backend.app.main import app
+from backend.app.main import app, _readiness_snapshot
 
 
 def _disable_models(monkeypatch, tmp_path):
@@ -31,6 +31,7 @@ def test_liveness_is_lightweight_and_readiness_fails_without_models(monkeypatch,
                 "offline_asr": False,
                 "speaker_embedding": False,
                 "file_diarization": False,
+                "live_offline_finalization": True,
             },
         }
         assert "text" not in ready.text and "audio" not in ready.text
@@ -44,6 +45,18 @@ def test_liveness_is_lightweight_and_readiness_fails_without_models(monkeypatch,
             "active": None, "capacity": None, "available_slots": None,
         }
         assert "file_path" not in status.text and "transcript" not in status.text
+
+
+def test_online_only_mode_is_not_ready_without_live_offline_final_process():
+    state = SimpleNamespace(
+        initialization_complete=True, database=None, files=None,
+        live_asr_service=object(), live_final_service=None,
+        transcription_service=None, speaker_registration_service=None,
+        file_worker_mode="embedded",
+    )
+    snapshot = _readiness_snapshot(state)
+    assert snapshot["checks"]["live_offline_finalization"] is False
+    assert snapshot["status"] == "not_ready"
 
 
 def test_status_reports_only_file_queue_counts_and_ready_when_fake_services_exist(monkeypatch, tmp_path):
@@ -61,6 +74,8 @@ def test_status_reports_only_file_queue_counts_and_ready_when_fake_services_exis
         )
         monkeypatch.setattr(state, "initialization_complete", False, raising=False)
         monkeypatch.setattr(state, "live_asr_service", object(), raising=False)
+        monkeypatch.setattr(state, "live_final_service",
+                            SimpleNamespace(available=True, close=lambda: None), raising=False)
         monkeypatch.setattr(state, "transcription_service", service, raising=False)
         monkeypatch.setattr(state, "speaker_registration_service",
                             SimpleNamespace(extractor=object()), raising=False)

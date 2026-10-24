@@ -222,6 +222,60 @@ def test_capacity_exhaustion_moves_registered_current_to_unknown():
     assert len(state._local_vectors) == 1
 
 
+def test_endpoint_final_captures_exact_pcm_and_offline_hotword_snapshot():
+    class EndpointRecognizer(FakeRecognizer):
+        def is_endpoint(self, stream):
+            return bool(stream.samples)
+
+    session = LiveASRSession(EndpointRecognizer(),
+                             options=StartOptions(hotwords=("online",),
+                                                  offline_hotwords=("offline",)))
+    events = session.feed(b"\x01\x00" * 100)
+    pending = session.drain_final_audio()
+
+    assert events[0]["status"] == "final"
+    assert len(pending) == 1
+    assert pending[0].segment_id == events[0]["segment_id"] == 1
+    assert pending[0].revision == events[0]["revision"]
+    assert len(pending[0].samples) == 100
+    assert pending[0].hotwords == ("offline",)
+    assert session.drain_final_audio() == []
+
+
+def test_confirmed_speaker_boundary_queues_only_old_side_audio():
+    class SwitchingTracker:
+        current = SpeakerIdentity("speaker_1", "registered_b", "乙")
+
+        def feed(self, _samples, _sample_count):
+            return [{"start": 50 / 16_000,
+                     "previous": {"local_speaker_id": "speaker_0",
+                                  "registered_speaker_id": "registered_a",
+                                  "speaker_name": "甲"},
+                     "speaker": {"local_speaker_id": "speaker_1",
+                                 "registered_speaker_id": "registered_b",
+                                 "speaker_name": "乙"}}]
+
+        def flush(self, _sample_count):
+            return []
+
+        @staticmethod
+        def _as_dict(identity):
+            return {"local_speaker_id": identity.local_speaker_id,
+                    "registered_speaker_id": identity.registered_speaker_id,
+                    "speaker_name": identity.speaker_name}
+
+    session = LiveASRSession(FakeRecognizer(), speaker_tracker=SwitchingTracker(),
+                             options=StartOptions(offline_hotwords=("离线词",)))
+    session.feed(b"\x01\x00" * 100)
+    pending = session.drain_final_audio()
+
+    assert len(pending) == 1
+    assert pending[0].segment_id == 1
+    assert len(pending[0].samples) == 50
+    assert pending[0].speaker["registered_speaker_id"] == "registered_a"
+    assert pending[0].hotwords == ("离线词",)
+
+
 def test_confirmed_switch_finalizes_old_segment_and_starts_non_overlapping_segment():
     live = LiveASRSession(FakeRecognizer(), options=StartOptions(), speaker_tracker=tracker())
     first = live.feed((b"\xff\x7f") * 32_000)

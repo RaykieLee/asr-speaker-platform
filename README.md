@@ -50,7 +50,7 @@ export ASR_DIARIZATION_MODEL_PATH=models/diarization/model.int8.onnx
 python -m backend.app.jobs.process
 ```
 
-外置模式下 API 进程只保存上传文件与任务记录，文件队列上限通过 `ASR_MAX_PENDING_JOBS` 配置；满队列返回 HTTP 429。Worker 从 SQLite 原子认领任务，启动时会将上次异常退出遗留的 `running` 任务重新排队。共享数据目录中的 `file-worker.lock` 保证同一时间只有一个 Worker 处理队列；若锁已被占用，第二个 Worker 会立即退出。实时 WebSocket 仍在 API 进程处理，文件任务使用独立进程中的离线模型。此模式面向单机部署，不提供多机或网络文件系统队列保证。
+外置模式下 API 进程保存上传文件与任务记录，文件队列上限通过 `ASR_MAX_PENDING_JOBS` 配置；满队列返回 HTTP 429。Worker 从 SQLite 原子认领任务，启动时会将上次异常退出遗留的 `running` 任务重新排队。共享数据目录中的 `file-worker.lock` 保证同一时间只有一个 Worker 处理文件队列；若锁已被占用，第二个 Worker 会立即退出。实时 WebSocket 仍由 API 接收在线识别；配置 `ASR_ONLINE_MODEL_DIR` 与 `ASR_OFFLINE_MODEL_DIR` 后，API 会另启动一个独立子进程专门做实时片段离线复识，API 主进程不加载该离线 ASR 模型。未配置离线模型时，在线连接仍可启动但 `started.offline_finalization` 为 `false`，只会得到在线结果；此时 `/ready` 的 `live_offline_finalization` 为 `false`，服务不会报告就绪。实时子进程使用有界内存队列，不写入文件任务表；队列满或复识失败会通过 WebSocket 错误事件报告。`ASR_LIVE_FINAL_QUEUE_SIZE` 默认 16、范围 1–64，单个 PCM WebSocket 帧最大 256 KiB。断线会取消该会话仍在队列中的请求；已经开始的单次离线推理无法抢占，会完成后丢弃结果。30 秒分段上限下，每个排队任务的 float32 音频最多约 1.92 MiB，队列默认容量的原始音频上限约 30 MiB，序列化过程有额外峰值；离线模型权重也会在实时复识子进程中额外占用内存。`/ready` 和 `/api/v1/status` 的 `live_offline_finalization` 检查该子进程是否存活。此模式面向单机部署，不提供多机或网络文件系统队列保证。
 
 The version value above labels the selected embedding artifact in stored profiles. Keep it unchanged for those profile vectors; if you replace the model, set a new version and re-enroll profiles. The service stores the SQLite database and uploaded audio under `ASR_DATA_DIR`.
 
@@ -96,7 +96,7 @@ python3.11 models/download.py pyannote-segmentation-3-0
 docker compose up --build
 ```
 
-Compose starts separate `asr` API and `asr-worker` services. Both mount the same `./data` directory; the API keeps the online model for WebSocket requests and queues file uploads, while only the Worker loads the offline recognition and diarization models. The published port binds to `127.0.0.1:8000` by default. Model weights are not copied into the Docker image. To serve other machines, place the service behind the deployment's authentication and TLS layer and change the host port binding deliberately.
+Compose starts separate `asr` API and `asr-worker` services. Both mount the same `./data` directory; the API keeps the online model for WebSocket requests and queues file uploads. When both online and offline ASR models are configured, the API also starts a dedicated child process for bounded real-time offline finalization; the standalone Worker continues to own persistent file jobs. The published port binds to `127.0.0.1:8000` by default. Model weights are not copied into the Docker image. To serve other machines, place the service behind the deployment's authentication and TLS layer and change the host port binding deliberately.
 
 本机 SQLite 和音频目录的备份、校验、恢复及 30 天任务原音频清理见 [存储维护说明](backend/app/storage/README.md)。备份中可能包含声纹与录音，应由部署方放在加密且限制访问的位置。
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 import json
 import uuid
 from typing import Any
@@ -12,8 +13,10 @@ from backend.app.api.auth import authorized_websocket
 from backend.app.audio.core import PCMFormatError
 from backend.app.engines.base import EngineConfigError
 from backend.app.pipelines.live_asr import LiveASRService, LiveProtocolError, parse_start_message
+from backend.app.pipelines.live_final import LiveFinalQueueFull
 
 router = APIRouter()
+MAX_PCM_FRAME_BYTES = 256 * 1024
 
 
 def _service(websocket: WebSocket) -> LiveASRService:
@@ -88,6 +91,7 @@ async def stream_asr(websocket: WebSocket) -> None:
             "type": "started", "protocol_version": 1, "session_id": session.session_id,
             "hotword_set_id": session.options.hotword_set_id,
             "hotword_set_version": session.options.hotword_set_version,
+            "offline_finalization": getattr(state, "live_final_service", None) is not None,
         })
         audio_queue: asyncio.Queue[bytes | None] = service.create_queue()
     except BaseException as exc:
@@ -97,10 +101,42 @@ async def stream_asr(websocket: WebSocket) -> None:
             return
         raise
     send_lock = asyncio.Lock()
+    final_tasks: set[asyncio.Task[Any]] = set()
 
     async def send_json(data: dict[str, Any]) -> None:
         async with send_lock:
             await websocket.send_json(data)
+
+    async def finalize_audio(segment: Any) -> None:
+        final_service = getattr(state, "live_final_service", None)
+        if final_service is None:
+            return
+        try:
+            future: Future[str] = await asyncio.to_thread(final_service.submit, segment)
+        except Exception as exc:
+            code = "offline_final_queue_full" if isinstance(exc, LiveFinalQueueFull) else "offline_final_unavailable"
+            message = "离线定稿队列已满" if code == "offline_final_queue_full" else "离线定稿暂不可用"
+            await send_json({"type": "error", "code": code, "message": message,
+                             "request_id": request_id, "session_id": session.session_id,
+                             "segment_id": segment.segment_id})
+            return
+        try:
+            text = await asyncio.wrap_future(future)
+            await send_json({"type": "segment", "session_id": session.session_id,
+                             "segment_id": segment.segment_id, "revision": segment.revision + 1,
+                             "status": "final", "start": segment.start, "end": segment.end,
+                             "text": text, **segment.speaker})
+        except Exception:
+            await send_json({"type": "error", "code": "offline_final_failed",
+                             "message": "离线定稿失败，保留在线识别结果",
+                             "request_id": request_id, "session_id": session.session_id,
+                             "segment_id": segment.segment_id})
+
+    def schedule_final_audio() -> None:
+        for segment in session.drain_final_audio():
+            task = asyncio.create_task(finalize_audio(segment))
+            final_tasks.add(task)
+            task.add_done_callback(final_tasks.discard)
 
     async def worker() -> None:
         while True:
@@ -110,12 +146,16 @@ async def stream_asr(websocket: WebSocket) -> None:
                     events = await asyncio.to_thread(session.finish)
                     for event in events:
                         await send_json(event)
+                    schedule_final_audio()
+                    if final_tasks:
+                        await asyncio.gather(*tuple(final_tasks), return_exceptions=True)
                     await send_json({"type": "completed", "session_id": session.session_id,
                                      "duration": session.duration, "dropped_frames": 0})
                     return
                 events = await asyncio.to_thread(session.feed, chunk)
                 for event in events:
                     await send_json(event)
+                schedule_final_audio()
             finally:
                 audio_queue.task_done()
 
@@ -137,6 +177,12 @@ async def stream_asr(websocket: WebSocket) -> None:
             if message["type"] == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
+                if len(message["bytes"]) > MAX_PCM_FRAME_BYTES:
+                    await _error(websocket, "audio_frame_too_large",
+                                 "单个音频帧超过 256 KiB 限制", request_id)
+                    await websocket.close(code=1009)
+                    stopped = True
+                    continue
                 try:
                     audio_queue.put_nowait(message["bytes"])
                 except asyncio.QueueFull:
@@ -173,6 +219,10 @@ async def stream_asr(websocket: WebSocket) -> None:
     finally:
         async with state.stream_lock:
             state.active_streams -= 1
+        final_service = getattr(state, "live_final_service", None)
+        cancel_session = getattr(final_service, "cancel_session", None)
+        if callable(cancel_session):
+            cancel_session(session.session_id)
         if receive_task is not None and not receive_task.done():
             receive_task.cancel()
         if not worker_task.done():
@@ -181,3 +231,7 @@ async def stream_asr(websocket: WebSocket) -> None:
                 await worker_task
             except (asyncio.CancelledError, Exception):
                 pass
+        for task in tuple(final_tasks):
+            task.cancel()
+        if final_tasks:
+            await asyncio.gather(*tuple(final_tasks), return_exceptions=True)

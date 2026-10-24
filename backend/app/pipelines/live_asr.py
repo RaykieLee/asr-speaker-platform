@@ -41,6 +41,21 @@ class StartOptions:
     hotwords: tuple[str, ...] = ()
     hotword_set_id: str | None = None
     hotword_set_version: int | str | None = None
+    offline_hotwords: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FinalAudio:
+    """Private audio snapshot for an offline correction; never sent over WS."""
+
+    session_id: str
+    segment_id: int
+    revision: int
+    start: float
+    end: float
+    samples: array.array
+    hotwords: tuple[str, ...]
+    speaker: dict[str, Any]
 
 
 class LiveASRSession:
@@ -68,6 +83,7 @@ class LiveASRSession:
         self.segment_samples = array.array("f")
         self.closed = False
         self.speaker_tracker = speaker_tracker or LiveSpeakerTracker()
+        self._final_audio: list[FinalAudio] = []
 
     @property
     def duration(self) -> float:
@@ -142,6 +158,7 @@ class LiveASRSession:
             event = self._event("final", text, start=self.segment_start, end=end)
             self._apply_speaker(event)
             events.append(event)
+            self._queue_final_audio(event, self.segment_samples)
             self.last_text = ""
             if not final:
                 self.segment_id += 1
@@ -156,6 +173,20 @@ class LiveASRSession:
             self._apply_speaker(event)
             events.append(event)
             self.last_text = text
+        elif endpoint or final:
+            # Preserve the boundary PCM even when online decoding is empty or
+            # unchanged; offline decoding may still recover a usable transcript.
+            event = self._event("final", text, start=self.segment_start, end=end)
+            self._apply_speaker(event)
+            self._queue_final_audio(event, self.segment_samples)
+            if endpoint and not final:
+                self.segment_id += 1
+                self.revision = 0
+                self.segment_start = end
+                self.segment_start_sample = self.samples_seen
+                self.segment_samples = array.array("f")
+                self.last_text = ""
+                self.stream = self.recognizer.create_stream(list(self.options.hotwords) or None)
         return events
 
     def _split_at_speaker_change(self, change: dict[str, Any]) -> list[dict[str, Any]]:
@@ -177,6 +208,15 @@ class LiveASRSession:
                                 end=boundary_sample / self.options.sample_rate)
             event.update(change.get("previous") or {})
             events.append(event)
+            self._queue_final_audio(event, before)
+        elif before:
+            # Offline ASR may recover speech that the online stream missed.
+            self._queue_final_audio({
+                "segment_id": self.segment_id, "revision": self.revision,
+                "start": self.segment_start,
+                "end": boundary_sample / self.options.sample_rate,
+                **(change.get("previous") or {}),
+            }, before)
 
         self.segment_id += 1
         self.revision = 0
@@ -199,6 +239,22 @@ class LiveASRSession:
         while self.recognizer.is_ready(stream):
             self.recognizer.decode_stream(stream)
         return self.recognizer.get_result(stream).strip()
+
+    def _queue_final_audio(self, event: dict[str, Any], samples: array.array) -> None:
+        if not samples:
+            return
+        speaker_keys = ("local_speaker_id", "registered_speaker_id", "speaker_name", "overlap")
+        self._final_audio.append(FinalAudio(
+            session_id=self.session_id,
+            segment_id=int(event["segment_id"]), revision=int(event["revision"]),
+            start=float(event["start"]), end=float(event["end"]),
+            samples=array.array("f", samples), hotwords=self.options.offline_hotwords,
+            speaker={key: event.get(key) for key in speaker_keys},
+        ))
+
+    def drain_final_audio(self) -> list[FinalAudio]:
+        pending, self._final_audio = self._final_audio, []
+        return pending
 
     def _rollover_if_needed(self) -> list[dict[str, Any]]:
         if len(self.segment_samples) < self.max_segment_samples:
@@ -229,7 +285,8 @@ class LiveASRService:
     def __init__(self, recognizer: OnlineRecognizer, *, queue_size: int = 16,
                  hotword_resolver: Any = None, vad: Any = None,
                  speaker_extractor: Any = None, speaker_matcher: Any = None,
-                 speaker_profiles: Any = (), speaker_options: dict[str, Any] | None = None):
+                 speaker_profiles: Any = (), speaker_options: dict[str, Any] | None = None,
+                 offline_hotword_resolver: Any = None):
         if queue_size < 1:
             raise ValueError("queue_size must be positive")
         self.recognizer = recognizer
@@ -240,6 +297,7 @@ class LiveASRService:
         self.speaker_matcher = speaker_matcher
         self.speaker_profiles = speaker_profiles
         self.speaker_options = speaker_options or {}
+        self.offline_hotword_resolver = offline_hotword_resolver
 
     async def create_session(self, options: StartOptions | None = None) -> LiveASRSession:
         if options and options.hotword_set_id and not self.hotword_resolver:
@@ -256,9 +314,25 @@ class LiveASRService:
                     raise ValueError("热词集内容无效")
             except Exception as exc:
                 raise EngineConfigError(f"热词集解析失败: {exc}") from exc
+            offline_words: tuple[str, ...] = ()
+            if self.offline_hotword_resolver is not None:
+                try:
+                    offline_resolved = self.offline_hotword_resolver(options.hotword_set_id, version)
+                    if inspect.isawaitable(offline_resolved):
+                        offline_resolved = await offline_resolved
+                    offline_words, offline_version = offline_resolved
+                    if offline_version != version:
+                        raise ValueError("在线与离线热词版本不一致")
+                    if not isinstance(offline_words, (tuple, list)) or any(
+                        not isinstance(word, str) or not word.strip() for word in offline_words
+                    ):
+                        raise ValueError("离线热词快照内容无效")
+                except Exception as exc:
+                    raise EngineConfigError(f"离线热词快照失败: {exc}") from exc
             options = StartOptions(sample_rate=options.sample_rate, format=options.format,
                                    hotwords=tuple(word.strip() for word in words), hotword_set_id=options.hotword_set_id,
-                                   hotword_set_version=version)
+                                   hotword_set_version=version,
+                                   offline_hotwords=tuple(word.strip() for word in offline_words))
         tracker = LiveSpeakerTracker(vad=self.vad, extractor=self.speaker_extractor,
                                      matcher=self.speaker_matcher, profiles=self.speaker_profiles,
                                      sample_rate=options.sample_rate if options else 16_000,
