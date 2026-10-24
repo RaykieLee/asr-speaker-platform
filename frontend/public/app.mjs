@@ -6,7 +6,7 @@ import { authorizationHeaders, compareHotwordTranscripts, dedupeHotwordEntries, 
 const $ = (id) => document.getElementById(id);
 const state = { hotwords: [], speakers: [], selectedSpeaker: null, selectedHotword: null,
   live: null, liveSegments: new Map(), job: null, jobData: null, poll: null,
-  hotwordDraftEntries: [], importPreview: null };
+  hotwordDraftEntries: [], importPreview: null, selectedAudioFile: null };
 const views = {
   live: ['实时识别', 'VOICE CAPTURE / 01', '让每段对话，都有迹可循。', '实时查看识别结果与说话人状态，录音会直接送往你配置的本地服务。'],
   files: ['文件转写', 'FILE TRANSCRIPTION / 02', '把音频整理成可检索的文字。', '上传文件后，任务会在本地识别服务中排队处理。'],
@@ -338,8 +338,40 @@ function showComparison(withoutHotwords, withHotwords) {
     : result.sameTranscript ? '两次任务返回的原始文字相同。' : '两次任务返回的原始文字不同；仅为文本差异，不代表准确率或热词收益。';
   return result;
 }
+function selectAudioFile(file, source = 'manual') {
+  state.selectedAudioFile = file || null;
+  $('file-prompt').textContent = file?.name || '拖入音频文件，或 浏览文件';
+  $('file-details').textContent = file
+    ? `${(file.size / 1024 / 1024).toFixed(1)} MB · ${file.type || '音频文件'}`
+    : '支持常见音频格式，最大 512 MB';
+  $('upload-file').disabled = !file;
+  $('file-source-state').textContent = !file
+    ? '选择本机音频，或载入内置双人样例。载入后可沿用下方语言、热词、声道和对比设置。'
+    : source === 'demo'
+      ? '当前选择：内置 AISHELL-3 双人 A/B/A/B 样例；将与手动文件使用相同的转写和热词对比流程。'
+      : '当前选择：本机音频文件；将使用与内置样例相同的转写流程。';
+}
+
+async function loadDemoAudio() {
+  const button = $('load-demo-audio');
+  button.disabled = true;
+  clearError($('upload-error'));
+  try {
+    const response = await fetch('/demo-assets/aishell3/two-speaker-abab.wav');
+    if (!response.ok) throw new Error(`内置样例暂不可用 (${response.status})`);
+    const blob = await response.blob();
+    const file = new File([blob], 'two-speaker-abab.wav', {type: 'audio/wav'});
+    $('audio-file').value = '';
+    selectAudioFile(file, 'demo');
+  } catch (error) {
+    showError($('upload-error'), new Error(error.message || '无法载入内置双人样例'));
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function submitFile() {
-  const file = $('audio-file').files[0]; if (!file) return;
+  const file = state.selectedAudioFile || $('audio-file').files[0]; if (!file) return;
   const compare = $('compare-hotwords').checked;
   const selectedId = $('file-hotword').value;
   if (compare && !selectedId) { showError($('upload-error'), new Error('请先选择热词方案，再运行同录音开 / 关对比。')); return; }
@@ -388,9 +420,10 @@ function bind() {
   $('dismiss-notice').addEventListener('click',()=>$('service-notice').classList.add('hidden'));
   $('start-live').addEventListener('click',startLive); $('stop-live').addEventListener('click',()=>stopCapture(true));
   $('clear-live').addEventListener('click',()=>{state.liveSegments.clear();renderLive();});
-  $('audio-file').addEventListener('change',e=>{const f=e.target.files[0]; $('file-prompt').textContent=f?.name || '拖入音频文件，或 浏览文件'; $('file-details').textContent=f ? `${(f.size/1024/1024).toFixed(1)} MB · ${f.type || '音频文件'}` : '支持常见音频格式，最大 512 MB'; $('upload-file').disabled=!f;});
+  $('audio-file').addEventListener('change',e=>selectAudioFile(e.target.files[0] || null, 'manual'));
   $('dropzone').addEventListener('dragover',e=>{e.preventDefault();$('dropzone').classList.add('dragging');}); $('dropzone').addEventListener('dragleave',()=> $('dropzone').classList.remove('dragging'));
   $('dropzone').addEventListener('drop',e=>{e.preventDefault();$('dropzone').classList.remove('dragging');if(e.dataTransfer.files[0]){$('audio-file').files=e.dataTransfer.files;$('audio-file').dispatchEvent(new Event('change'));}});
+  $('load-demo-audio').addEventListener('click',loadDemoAudio);
   $('upload-file').addEventListener('click',submitFile); $('copy-result').addEventListener('click',()=>navigator.clipboard?.writeText(normalizeJobForDisplay(state.jobData || {}).segments.map(s=>s.text).join('\n') || normalizeJobForDisplay(state.jobData || {}).text).then(()=>toast('已复制转写文本')));
   $('hotword-entry-list').addEventListener('input', event => {
     const field = event.target.dataset.entryField; if (!field) return;
