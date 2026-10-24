@@ -1,0 +1,73 @@
+{
+  "dataset": {
+    "name": "AISHELL-3",
+    "license": "Apache-2.0",
+    "openslr_resource": "https://www.openslr.org/93/",
+    "huggingface_dataset": "https://huggingface.co/datasets/AISHELL/AISHELL-3",
+    "huggingface_revision": "f20d5db4a31fe779ef07bb1af4ea92da5c786622",
+    "transcript_file": "test/content.txt",
+    "paper": "https://arxiv.org/abs/2010.11567",
+    "authors": ["Yao Shi", "Hui Bu", "Xin Xu", "Shaoji Zhang", "Ming Li"]
+  },
+  "silence_between_clips_ms": 350,
+  "speakers": [
+    {
+      "alias": "A",
+      "dataset_speaker_id": "SSB0686",
+      "registration_clip_ids": ["SSB06860085", "SSB06860490"]
+    },
+    {
+      "alias": "B",
+      "dataset_speaker_id": "SSB0394",
+      "registration_clip_ids": ["SSB03940282", "SSB03940488"]
+    }
+  ],
+  "demo_turns": [
+    {"speaker": "A", "clip_id": "SSB06860008"},
+    {"speaker": "B", "clip_id": "SSB03940088"},
+    {"speaker": "A", "clip_id": "SSB06860470"},
+    {"speaker": "B", "clip_id": "SSB03940366"}
+  ],
+  "clips": {
+    "SSB06860085": {
+      "source_pinyin_line": "你 ni3 在 zai4 这儿 zher4 工 gong1 作 zuo4",
+      "reference_text": "你在这儿工作",
+      "sha256": "8ad31dbbc9bb696f8565801b2c3ef8d122b6e0d807665012fdc77dc53a7e02a1"
+    },
+    "SSB06860490": {
+      "source_pinyin_line": "我 wo3 们 men5 得 dei3 去 qu4 宿 su4 舍 she4",
+      "reference_text": "我们得去宿舍",
+      "sha256": "037f0584c66f43ec5d6b0ac51a846d7666806232cf970355195cfbc0e094995b"
+    },
+    "SSB06860008": {
+      "source_pinyin_line": "你 ni3 别 bie2 那 na4 样 yang4 好 hao3 吗 ma5",
+      "reference_text": "你别那样好吗",
+      "sha256": "d360702fcdac59b63d4db6197790e81cd914dfebfcfb15d230a3a1cb0de89664"
+    },
+    "SSB06860470": {
+      "source_pinyin_line": "你 ni3 能 neng2 看 kan4 到 dao4 她 ta1 吗 ma5",
+      "reference_text": "你能看到她吗",
+      "sha256": "e42159e641d2eebaf0fe53621872c0053958d9987624df9fc1ce03b7b33d6c80"
+    },
+    "SSB03940282": {
+      "source_pinyin_line": "信 xin4 上 shang4 说 shuo1 了 le5 什 shen2 么 me5",
+      "reference_text": "信上说了什么",
+      "sha256": "ba1a39e25dd8186e279394112bc586545ca2e45717383f9de522e671ccd5e35a"
+    },
+    "SSB03940488": {
+      "source_pinyin_line": "他 ta1 离 li2 家 jia1 出 chu1 走 zou3 了 le5",
+      "reference_text": "他离家出走了",
+      "sha256": "546c806c3cec82ab799fd88721d59e11bb9128d8187d513578b8767a031f8bf8"
+    },
+    "SSB03940088": {
+      "source_pinyin_line": "桌 zhuo1 上 shang4 是 shi4 什 shen2 么 me5",
+      "reference_text": "桌上是什么",
+      "sha256": "6341d23b2bd4643d6615eeb6c4846c9b71977cb08e011097afcd2e3a846e79e6"
+    },
+    "SSB03940366": {
+      "source_pinyin_line": "不 bu4 如 ru2 一 yi2 块儿 kuair4 玩儿 wanr2 吧 ba5",
+      "reference_text": "不如一块儿玩儿吧",
+      "sha256": "a694946071a7dbf44862c859fea396a092396f5b189d17d4cb3b2a7f59531eae"
+    }
+  }
+}

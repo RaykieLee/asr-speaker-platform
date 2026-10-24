@@ -64,6 +64,8 @@ Speaker enrollment uploads are limited to 64 MiB and 120 seconds by default. Ove
 
 运行 `python demo/prepare_samples.py` 可从本机已验证的模型归档中生成两声音流程样本，再按 [demo/README.md](demo/README.md) 完成演示。样本是流程检查资料，不能代替业务录音的准确率评估。
 
+可再分发的真实普通话双人样本、A/B 注册音频和 A/B/A/B Demo 音频见 [demo_assets/aishell3/README.md](demo_assets/aishell3/README.md)；附有 Apache-2.0 归属声明、逐段参考文字、来源哈希和可复现脚本。
+
 ## 压测与容量
 
 压测工具支持实时、文件及混合负载，并输出会话、延迟、错误、进程 CPU 和内存 JSON/CSV 报告。输入必须为单声道 16 kHz PCM16 WAV。示例：
