@@ -185,7 +185,10 @@ def create_backup(database_path: str | Path, files_root: str | Path,
         raise ValueError("retention_days must be at least one")
     source_db = Path(database_path).expanduser().resolve()
     source_files = Path(files_root).expanduser().resolve()
-    target = Path(destination).expanduser().resolve()
+    requested_target = Path(destination).expanduser()
+    if requested_target.is_symlink():
+        raise ValueError("backup destination must not be a symbolic link")
+    target = requested_target.resolve()
     if not source_db.is_file():
         raise FileNotFoundError(f"database does not exist: {source_db}")
     if not source_files.is_dir():

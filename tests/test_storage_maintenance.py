@@ -203,6 +203,20 @@ def test_backup_rejects_path_traversal_and_restore_never_overwrites(tmp_path):
     db2.close()
 
 
+def test_backup_rejects_dangling_destination_symlink_without_creating_referent(tmp_path):
+    database, files = open_store(tmp_path)
+    destination = tmp_path / "backup-alias"
+    referent = tmp_path / "actual-backup"
+    destination.symlink_to(referent, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="backup destination.*symbolic link"):
+        create_backup(database.path, files.root, destination)
+
+    assert destination.is_symlink()
+    assert not referent.exists()
+    database.close()
+
+
 def test_cleanup_refuses_internal_symlink_to_registered_sample(tmp_path):
     database, files = open_store(tmp_path)
     now = datetime.now(timezone.utc)
