@@ -21,7 +21,8 @@ python -m loadtest --base-url http://asr-host:8000 \
   --wav samples/authorized-mono-16k.wav \
   --mode realtime --concurrency 1,2,4,8 --frame-ms 40 --repeats 10 \
   --hotword-set-id hotwords-v3 --speaker-scope team-a \
-  --server-pid 12345 --output results/2026-10-23-realtime
+  --resource-process api=12345 --resource-process worker=12360 \
+  --output results/2026-10-23-realtime
 ```
 
 `--repeats` 循环拼接输入 PCM，让录音片段可持续播放到更长时长（例如 60 秒片段重复 10 次约为 10 分钟）。重复音频不等于丰富的业务样本，应记录循环方式并用经授权的代表性音频。默认未指定 `--tier-duration-seconds` 时保留原行为：`--mode file` 在每个阶梯档并行提交同档数量的文件任务；`--mode mixed` 每档启动指定路数实时连接，并额外用 `--file-concurrency` 个文件任务同时施压。
@@ -38,11 +39,11 @@ python -m loadtest --wav samples/authorized-mono-16k.wav \
 
 持续模式需要经授权且适合长时间循环的音频；应在报告中记录循环方式。`config` 会写入 `tier_duration_seconds`、`max_file_jobs_per_tier`、`file_jobs_by_concurrency_tier` 和 `start_stagger_ms`。文件任务在 `POST /api/v1/transcriptions` 创建，然后轮询 `GET /api/v1/transcriptions/{job_id}`。实时模式连接 `/api/v1/stream`，发 `start` JSON、按真实时间节奏发送 PCM 二进制帧，再发 `stop`。
 
-鉴权可使用 `--token`，更推荐 `ASR_API_TOKEN` 环境变量。服务端进程资源采集需要本机可访问对应 PID；不传 PID 时 psutil 若可用则采集压测客户端进程及系统 CPU/内存，并在报告中标出作用范围。未安装 psutil 时跳过资源采样；它不会作为强制依赖装入后端。
+鉴权可使用 `--token`，更推荐 `ASR_API_TOKEN` 环境变量。服务端进程资源采集需要本机可访问对应 PID。重复传入 `--resource-process ROLE=PID` 可覆盖 API、外置 Worker 等多个进程根；每个根的后代进程也会采样，PID 重叠时每个进程只计一次。每个采样点同时记录总 CPU/RSS/PSS 和按角色标记的进程明细，配置中列出采样根及资源范围。旧参数 `--server-pid PID` 保留，等价于 API 进程根并包含其后代。不传 PID 时 psutil 若可用则采集压测客户端进程及系统 CPU/内存，并在报告中标出作用范围。未安装 psutil 时跳过资源采样；它不会作为强制依赖装入后端。
 
 ## 输出和指标
 
-每次运行产生 `report.json` 和 `sessions.csv`。报告包含配置、机器元数据、输入文件名与 SHA-256、每会话开始时间和 ID、首个 partial、最终文本及说话人时间、错误类型、已发送帧数、客户端发送积压/迟发帧、服务端显式报告的丢帧（如果协议提供）、文件队列/处理耗时、RTF、P50/P95/P99、资源采样以及门槛。文件队列时长优先使用服务端 `queue_seconds`；若服务端没有该字段，则取客户端首次观察到 `running` 的时间作为队列结束近似值。处理时长优先使用服务端 `processing_seconds`；否则按首次观察到 `running` 至终态的客户端时间估算。文件处理小时吞吐使用“成功且处理时长大于零的音频秒数 ÷ 同一批处理秒数”；墙钟小时吞吐使用“成功任务音频秒数 ÷ 整轮墙钟秒数”。秒/秒即小时/小时的比值，失败任务不进入吞吐分子；缺失的处理时长不会按零补入分母。报告含最终转写文本和说话人信息，需按录音数据的保密要求存放与分享。
+每次运行产生 `report.json` 和 `sessions.csv`。报告包含配置、机器元数据、输入文件名与 SHA-256、每会话开始时间和 ID、首个 partial、最终文本及说话人时间、错误类型、已发送帧数、客户端发送积压/迟发帧、服务端显式报告的丢帧（如果协议提供）、文件队列/处理耗时、RTF、P50/P95/P99、资源采样以及门槛。多进程资源采样的采样点顶层是去重后的进程树总量，`processes` 数组保留各 PID/角色明细；旧报告中单行 `server_pid` 采样格式仍可读取。文件队列时长优先使用服务端 `queue_seconds`；若服务端没有该字段，则取客户端首次观察到 `running` 的时间作为队列结束近似值。处理时长优先使用服务端 `processing_seconds`；否则按首次观察到 `running` 至终态的客户端时间估算。文件处理小时吞吐使用“成功且处理时长大于零的音频秒数 ÷ 同一批处理秒数”；墙钟小时吞吐使用“成功任务音频秒数 ÷ 整轮墙钟秒数”。秒/秒即小时/小时的比值，失败任务不进入吞吐分子；缺失的处理时长不会按零补入分母。报告含最终转写文本和说话人信息，需按录音数据的保密要求存放与分享。
 
 可将已生成的 `report.json` 转成不依赖网络和额外 Python 包的离线 HTML 图表：
 

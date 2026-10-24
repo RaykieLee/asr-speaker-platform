@@ -503,7 +503,10 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
     pcm = source_pcm * args.repeats if args.mode in {"realtime", "mixed"} else source_pcm
     audio_seconds = source_audio_seconds * args.repeats
     run_started = time.monotonic()
-    sampler = ResourceSampler(args.resource_interval, args.server_pid)
+    resource_targets = list(args.resource_process or [])
+    if args.server_pid is not None:
+        resource_targets.insert(0, ("api", args.server_pid))
+    sampler = ResourceSampler(args.resource_interval, args.server_pid, resource_targets)
     results: list[Any] = []
     temp_dir = tempfile.TemporaryDirectory(prefix="asr-loadtest-")
     upload_path = args.wav
@@ -626,6 +629,8 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
         "audio_seconds": audio_seconds,
         "wall_elapsed_seconds": time.monotonic() - run_started,
         "server_pid": args.server_pid,
+        "resource_targets": [{"role": role, "pid": pid} for role, pid in resource_targets],
+        "resource_scope": "unique_descendants_of_configured_process_roots" if resource_targets else "loadtest_client_process",
         "thresholds": {
             "max_error_rate": args.max_error_rate,
             "max_first_partial_p95_seconds": args.max_first_partial_p95,
@@ -684,6 +689,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--resource-interval", type=float, default=1.0)
     parser.add_argument("--server-pid", type=int, help="sample this server process if psutil is installed")
+    parser.add_argument(
+        "--resource-process", action="append", default=[], metavar="ROLE=PID",
+        help="sample a process root and its descendants; repeat for API/worker roots (overlaps are counted once)",
+    )
     parser.add_argument("--max-error-rate", type=float, default=0.01)
     parser.add_argument("--max-first-partial-p95", type=float, default=2.0)
     parser.add_argument(
@@ -710,6 +719,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    parsed_targets: list[tuple[str, int]] = []
+    for raw_target in args.resource_process:
+        role, separator, raw_pid = raw_target.partition("=")
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            pid = 0
+        if not separator or not role.strip() or pid < 1:
+            parser.error("--resource-process must be ROLE=positive-PID")
+        parsed_targets.append((role.strip(), pid))
+    args.resource_process = parsed_targets
     import os
     args.token = args.token or os.environ.get("ASR_API_TOKEN")
     if (

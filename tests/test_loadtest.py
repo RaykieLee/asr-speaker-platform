@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loadtest.core import (SessionResult, aggregate_final_speaker_events, evaluate_gates,
+from loadtest.core import (ResourceSampler, SessionResult, aggregate_final_speaker_events, evaluate_gates,
                            pace_pcm, percentile, summarize, write_report)
 from loadtest.runner import (_run_continuous_file_tier, build_parser, load_wav, run,
                             run_file_job, run_live_session, write_repeated_wav)
@@ -16,6 +16,73 @@ def test_percentile_uses_linear_interpolation_and_empty_values():
     assert percentile([1, 2, 3, 4], 50) == 2.5
     assert percentile([1, 2, 3, 4], 95) == pytest.approx(3.85)
     assert percentile([], 95) is None
+
+
+def test_resource_sampler_aggregates_configured_process_trees_without_double_count(monkeypatch):
+    class FakeProcess:
+        def __init__(self, pid, children=()):
+            self.pid, self._children = pid, list(children)
+        def children(self, recursive=False):
+            return self._children
+        def memory_info(self): return SimpleNamespace(rss=self.pid * 100)
+        def cpu_percent(self, interval=None): return float(self.pid)
+        def num_threads(self): return 1
+        def memory_full_info(self): return SimpleNamespace(pss=self.pid * 50)
+
+    worker_child = FakeProcess(30)
+    worker = FakeProcess(20, [worker_child])
+    api = FakeProcess(10, [worker, worker_child])
+    instances = {10: api, 20: worker, 30: worker_child}
+    fake_psutil = SimpleNamespace(
+        Process=lambda pid: instances[pid],
+        NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+        AccessDenied=type("AccessDenied", (Exception,), {}),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    async def collect_one():
+        sampler = ResourceSampler(10, process_targets=[("api", 10), ("worker", 20)])
+        await sampler.start()
+        await asyncio.sleep(0.01)
+        await sampler.stop()
+        return sampler.samples[0]
+
+    sample = asyncio.run(collect_one())
+    assert sample["scope"] == "process_tree_total"
+    assert sample["cpu_percent"] == 60
+    assert sample["rss_bytes"] == 6000
+    assert sample["pss_bytes"] == 3000
+    assert {row["pid"] for row in sample["processes"]} == {10, 20, 30}
+    assert len(sample["processes"]) == 3
+
+
+def test_resource_process_cli_accepts_multiple_named_roots():
+    args = build_parser().parse_args([
+        "--wav", "sample.wav", "--server-pid", "101",
+        "--resource-process", "worker=202", "--resource-process", "realtime=303",
+    ])
+    assert args.server_pid == 101
+    assert args.resource_process == ["worker=202", "realtime=303"]
+
+
+def test_resource_sampler_marks_aggregate_unavailable_when_a_root_is_missing(monkeypatch):
+    class NoSuchProcess(Exception): pass
+    class AccessDenied(Exception): pass
+    fake_psutil = SimpleNamespace(Process=lambda _pid: (_ for _ in ()).throw(NoSuchProcess()),
+                                  NoSuchProcess=NoSuchProcess, AccessDenied=AccessDenied)
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    async def collect_one():
+        sampler = ResourceSampler(10, process_targets=[("worker", 999)])
+        await sampler.start()
+        await asyncio.sleep(0.01)
+        await sampler.stop()
+        return sampler.samples[0]
+
+    sample = asyncio.run(collect_one())
+    assert sample["rss_bytes"] is None
+    assert sample["cpu_percent"] is None
+    assert sample["target_errors"][0]["role"] == "worker"
 
 
 def test_final_speaker_events_deduplicate_by_segment_and_revision_without_exposing_payload():

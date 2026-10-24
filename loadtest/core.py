@@ -252,11 +252,15 @@ def _finite_number(value: Any) -> float | None:
 
 
 class ResourceSampler:
-    """Optional psutil sampler; samples the server PID when supplied."""
+    """Optionally sample one or more process roots and their unique descendants."""
 
-    def __init__(self, interval_seconds: float = 1.0, pid: int | None = None) -> None:
+    def __init__(self, interval_seconds: float = 1.0, pid: int | None = None,
+                 process_targets: list[tuple[str, int]] | None = None) -> None:
         self.interval_seconds = interval_seconds
         self.pid = pid
+        self.process_targets = list(process_targets or [])
+        if pid is not None and not self.process_targets:
+            self.process_targets = [("api", pid)]
         self.samples: list[dict[str, Any]] = []
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -279,40 +283,58 @@ class ResourceSampler:
     async def _collect(self) -> None:
         psutil = self._psutil
         assert psutil is not None
-        target = None
         while not self._stop.is_set():
             sampled_at = datetime.now(timezone.utc).isoformat()
             try:
-                if target is None:
-                    target = psutil.Process(self.pid) if self.pid else psutil.Process(os.getpid())
-                memory = target.memory_info()
-                sample: dict[str, Any] = {
-                    "sampled_at": sampled_at,
-                    "scope": "server_pid" if self.pid else "loadtest_client_process",
-                    "pid": target.pid,
-                    "cpu_percent": target.cpu_percent(interval=None),
-                    "rss_bytes": memory.rss,
-                    "threads": target.num_threads(),
-                    "open_files": len(target.open_files()),
-                }
-                try:
-                    sample["pss_bytes"] = target.memory_full_info().pss
-                except (AttributeError, psutil.AccessDenied, OSError):
-                    sample["pss_bytes"] = None
-                try:
-                    io_counters = target.io_counters()
-                    sample["read_bytes"] = io_counters.read_bytes
-                    sample["write_bytes"] = io_counters.write_bytes
-                except (AttributeError, psutil.AccessDenied, OSError):
-                    sample["read_bytes"] = None
-                    sample["write_bytes"] = None
+                targets = self.process_targets or [("loadtest_client", os.getpid())]
+                processes: dict[int, tuple[str, Any]] = {}
+                target_errors: list[dict[str, Any]] = []
+                for role, root_pid in targets:
+                    try:
+                        root = psutil.Process(root_pid)
+                        processes.setdefault(root.pid, (role, root))
+                        for child in root.children(recursive=True):
+                            processes.setdefault(child.pid, (role, child))
+                    except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+                        target_errors.append({"role": role, "pid": root_pid, "error": type(exc).__name__})
+                process_rows: list[dict[str, Any]] = []
+                for process_pid, (role, process) in sorted(processes.items()):
+                    try:
+                        memory = process.memory_info()
+                        row: dict[str, Any] = {
+                            "role": role, "pid": process_pid,
+                            "cpu_percent": process.cpu_percent(interval=None), "rss_bytes": memory.rss,
+                            "threads": process.num_threads(),
+                        }
+                        try:
+                            row["pss_bytes"] = process.memory_full_info().pss
+                        except (AttributeError, psutil.AccessDenied, OSError):
+                            row["pss_bytes"] = None
+                        process_rows.append(row)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        target_errors.append({"pid": process_pid, "error": "process_unavailable"})
+                if self.process_targets:
+                    totals_available = bool(process_rows) and not target_errors
+                    sample = {
+                        "sampled_at": sampled_at, "scope": "process_tree_total",
+                        "cpu_percent": sum(row["cpu_percent"] for row in process_rows) if totals_available else None,
+                        "rss_bytes": sum(row["rss_bytes"] for row in process_rows) if totals_available else None,
+                        "threads": sum(row["threads"] for row in process_rows) if totals_available else None,
+                        "pss_bytes": (sum(row["pss_bytes"] for row in process_rows)
+                                      if totals_available and all(row["pss_bytes"] is not None for row in process_rows)
+                                      else None),
+                        "processes": process_rows,
+                        "target_errors": target_errors,
+                    }
+                else:
+                    row = process_rows[0] if process_rows else {}
+                    sample = {"sampled_at": sampled_at, "scope": "loadtest_client_process", **row}
+                    sample["system_cpu_percent"] = psutil.cpu_percent(interval=None)
+                    sample["system_memory_percent"] = psutil.virtual_memory().percent
                 self.samples.append(sample)
-                if not self.pid:
-                    self.samples[-1]["system_cpu_percent"] = psutil.cpu_percent(interval=None)
-                    self.samples[-1]["system_memory_percent"] = psutil.virtual_memory().percent
             except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-                self.samples.append({"sampled_at": sampled_at, "scope": "server_pid", "error": str(exc)})
-                return
+                self.samples.append({"sampled_at": sampled_at, "scope": "process_tree_total",
+                                     "error": type(exc).__name__})
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
             except TimeoutError:
