@@ -66,6 +66,8 @@ Speaker enrollment uploads are limited to 64 MiB and 120 seconds by default. Ove
 
 可再分发的真实普通话双人样本、A/B 注册音频和 A/B/A/B Demo 音频见 [demo_assets/aishell3/README.md](demo_assets/aishell3/README.md)；附有 Apache-2.0 归属声明、逐段参考文字、来源哈希和可复现脚本。
 
+快速演示：在“声纹人员”中分别建立示例 A/B 并上传 `demo_assets/aishell3/registration/speaker-a.wav`、`demo_assets/aishell3/registration/speaker-b.wav`；在“热词词库”建立方案并添加所需词语；切换到“文件转写”，点击“载入双人样例”，选择热词方案后点击“开始转写”。结果页显示各段文字、时间和匹配的人员名称，也可纠正标签并导出。内置样例只用于流程演示，实际准确率须以人工标注的目标场景录音评估。一次真实模型与浏览器端到端验收记录见 [reports/demo-e2e-mac-2026-10-25.md](reports/demo-e2e-mac-2026-10-25.md)。
+
 ## 压测与容量
 
 压测工具支持实时、文件及混合负载，并输出会话、延迟、错误、进程 CPU 和内存 JSON/CSV 报告。输入必须为单声道 16 kHz PCM16 WAV。示例：
