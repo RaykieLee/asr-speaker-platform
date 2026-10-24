@@ -53,16 +53,40 @@ async def pace_pcm(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     on_progress: Callable[[int, float, int], None] | None = None,
+    repeat_count: int = 1,
+    max_audio_seconds: float | None = None,
 ) -> dict[str, float | int]:
     """Send PCM frames against a wall-clock audio timeline and expose client backlog."""
+    if repeat_count < 1:
+        raise ValueError("repeat_count must be positive")
+    if max_audio_seconds is not None and (not math.isfinite(max_audio_seconds) or max_audio_seconds <= 0):
+        raise ValueError("max_audio_seconds must be positive and finite")
+    if not pcm:
+        raise ValueError("PCM must not be empty")
     frame_bytes = pcm_frame_bytes(frame_ms, sample_rate, sample_width)
     frame_seconds = frame_ms / 1000
+    bytes_per_second = sample_rate * sample_width
+    available_bytes = len(pcm) * repeat_count
+    if max_audio_seconds is not None:
+        byte_limit = int(max_audio_seconds * bytes_per_second)
+        byte_limit -= byte_limit % sample_width
+        available_bytes = min(available_bytes, byte_limit)
+        if available_bytes == 0:
+            raise ValueError("max_audio_seconds is shorter than one PCM sample")
     started = clock()
     sent = 0
     max_lag = 0.0
     late_frames = 0
-    for offset in range(0, len(pcm), frame_bytes):
-        frame = pcm[offset : offset + frame_bytes]
+    for offset in range(0, available_bytes, frame_bytes):
+        frame_end = min(available_bytes, offset + frame_bytes)
+        logical_offset = offset
+        frame_parts: list[bytes] = []
+        while logical_offset < frame_end:
+            source_offset = logical_offset % len(pcm)
+            part_end = min(frame_end - logical_offset, len(pcm) - source_offset)
+            frame_parts.append(pcm[source_offset : source_offset + part_end])
+            logical_offset += part_end
+        frame = b"".join(frame_parts)
         target = started + sent * frame_seconds
         delay = target - clock()
         if delay > 0:
@@ -71,7 +95,7 @@ async def pace_pcm(
         sent += 1
         # Compare against the amount of audio actually transmitted, including a
         # short tail frame, rather than assuming every final packet is full.
-        audio_sent = min(len(pcm), offset + len(frame)) / (sample_rate * sample_width)
+        audio_sent = min(available_bytes, offset + len(frame)) / bytes_per_second
         lag = max(0.0, clock() - (started + audio_sent))
         max_lag = max(max_lag, lag)
         if lag >= frame_seconds:
@@ -79,7 +103,7 @@ async def pace_pcm(
         if on_progress is not None:
             on_progress(sent, max_lag, late_frames)
     elapsed = max(0.0, clock() - started)
-    duration = len(pcm) / (sample_rate * sample_width)
+    duration = available_bytes / bytes_per_second
     return {
         "frames_sent": sent,
         "audio_seconds": duration,
@@ -107,6 +131,7 @@ class SessionResult:
     websocket_close_reason: str = ""
     first_partial_seconds: float | None = None
     final_text_seconds: float | None = None
+    first_final_segment_seconds: float | None = None
     completion_after_stop_seconds: float | None = None
     speaker_seconds: float | None = None
     final_text: str = ""
@@ -359,7 +384,12 @@ def evaluate_gates(summary: dict[str, Any], thresholds: dict[str, Any]) -> dict[
 
 
 def summarize(results: list[SessionResult]) -> dict[str, Any]:
-    elapsed_values = [item.final_text_seconds for item in results if item.final_text_seconds is not None]
+    elapsed_values = [
+        item.first_final_segment_seconds
+        if item.first_final_segment_seconds is not None else item.final_text_seconds
+        for item in results
+        if item.first_final_segment_seconds is not None or item.final_text_seconds is not None
+    ]
     completion_values = [item.completion_after_stop_seconds for item in results if item.completion_after_stop_seconds is not None]
     partial_values = [item.first_partial_seconds for item in results if item.first_partial_seconds is not None]
     speaker_values = [item.speaker_seconds for item in results if item.speaker_seconds is not None]
@@ -427,6 +457,9 @@ def summarize(results: list[SessionResult]) -> dict[str, Any]:
         "file_attempted_audio_seconds": sum(item.audio_seconds for item in file_results),
         "latency_seconds": {
             "first_partial": {f"p{p}": percentile(partial_values, p) for p in (50, 95, 99)},
+            "first_final_segment": {f"p{p}": percentile(elapsed_values, p) for p in (50, 95, 99)},
+            # Legacy alias: this is session-start to first final text/segment arrival,
+            # not time relative to the end of the spoken audio.
             "final_text": {f"p{p}": percentile(elapsed_values, p) for p in (50, 95, 99)},
             "completion_after_stop": {f"p{p}": percentile(completion_values, p) for p in (50, 95, 99)},
             "speaker": {f"p{p}": percentile(speaker_values, p) for p in (50, 95, 99)},
@@ -497,6 +530,7 @@ def write_report(
     fieldnames = [
         "run_id", "mode", "session_id", "started_at", "audio_seconds", "frames_sent", "server_dropped_frames",
         "max_client_backlog_seconds", "client_late_frames", "first_partial_seconds", "final_text_seconds",
+        "first_final_segment_seconds",
         "completion_after_stop_seconds",
         "speaker_seconds", "server_error_code", "server_error_message", "websocket_close_code",
         "websocket_close_reason", "concurrency_tier", "final_segment_count", "final_speaker_labeled_segment_count",

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import math
 import tempfile
 import time
 import uuid
@@ -125,17 +126,25 @@ async def run_live_session(
     token: str | None,
     timeout_seconds: float,
     concurrency_tier: int | None = None,
+    repeat_count: int = 1,
+    max_audio_seconds: float | None = None,
+    start_delay_seconds: float = 0.0,
 ) -> SessionResult:
     try:
         import websockets  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError("websockets is required; install loadtest/requirements.txt") from exc
+    if start_delay_seconds > 0:
+        await asyncio.sleep(start_delay_seconds)
     result = SessionResult(
         run_id=run_id,
         mode="realtime",
         started_at=datetime.now(timezone.utc).isoformat(),
         start_monotonic=time.monotonic(),
-        audio_seconds=len(pcm) / (SAMPLE_RATE * SAMPLE_WIDTH),
+        audio_seconds=min(
+            len(pcm) * repeat_count / (SAMPLE_RATE * SAMPLE_WIDTH),
+            max_audio_seconds if max_audio_seconds is not None else float("inf"),
+        ),
         concurrency_tier=concurrency_tier,
     )
     headers = {"Authorization": f"Bearer {token}"} if token else None
@@ -214,6 +223,8 @@ async def run_live_session(
                     result.final_text = "".join(
                         part[3] for part in sorted(final_segments.values(), key=lambda value: value[2])
                     )
+                    if result.first_final_segment_seconds is None:
+                        result.first_final_segment_seconds = received
                     if result.final_text_seconds is None:
                         result.final_text_seconds = received
                     speaker = event.get("speaker_name") or event.get("registered_speaker_id") or event.get("local_speaker_id")
@@ -235,6 +246,8 @@ async def run_live_session(
                 if _is_type(event, "final") and str(event.get("type", "")).lower() != "segment":
                     text = str(event.get("text", ""))
                     result.final_text = (result.final_text + text).strip() or text
+                    if result.first_final_segment_seconds is None:
+                        result.first_final_segment_seconds = received
                     if result.final_text_seconds is None:
                         result.final_text_seconds = received
                     speaker = event.get("speaker_name") or event.get("registered_speaker_id") or event.get("local_speaker_id")
@@ -294,7 +307,10 @@ async def run_live_session(
                     result.max_client_backlog_seconds = backlog
                     result.client_late_frames = late_frames
 
-                paced = await pace_pcm(pcm, send_audio, frame_ms=frame_ms, on_progress=progress)
+                paced = await pace_pcm(
+                    pcm, send_audio, frame_ms=frame_ms, on_progress=progress,
+                    repeat_count=repeat_count, max_audio_seconds=max_audio_seconds,
+                )
                 result.frames_sent = int(paced["frames_sent"])
                 result.max_client_backlog_seconds = float(paced["max_client_backlog_seconds"])
                 result.client_late_frames = int(paced["client_late_frames"])
@@ -429,6 +445,58 @@ def _csv_ints(value: str) -> list[int]:
     return parsed
 
 
+async def _run_continuous_file_tier(
+    *,
+    slots: int,
+    duration_seconds: float,
+    max_jobs: int,
+    deadline: float,
+    path: Path,
+    audio_seconds: float,
+    base_url: str,
+    run_tag: str,
+    hotword_set_id: str | None,
+    token: str | None,
+    poll_seconds: float,
+    timeout_seconds: float,
+    concurrency_tier: int,
+    job_runner=None,
+    clock=time.monotonic,
+) -> list[SessionResult]:
+    """Keep a bounded number of file jobs active until the tier window closes.
+
+    A slot submits its replacement only after its previous task reaches a final
+    state. The window limits submission time; ``max_jobs`` and the number of
+    slots also bound result growth and outstanding service work.
+    """
+    if slots < 1 or max_jobs < 1 or duration_seconds <= 0:
+        raise ValueError("continuous file load requires positive slots, duration, and job cap")
+    runner = job_runner or run_file_job
+    lock = asyncio.Lock()
+    next_index = 0
+    results: list[SessionResult] = []
+
+    async def worker(_slot_index: int) -> None:
+        nonlocal next_index
+        while True:
+            async with lock:
+                if clock() >= deadline or next_index >= max_jobs:
+                    return
+                next_index += 1
+                task_index = next_index
+            result = await runner(
+                path=path, audio_seconds=audio_seconds, base_url=base_url,
+                run_id=f"{run_tag}-file-{task_index}", hotword_set_id=hotword_set_id,
+                token=token, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds,
+            )
+            result.concurrency_tier = concurrency_tier
+            result.audio_seconds = audio_seconds
+            results.append(result)
+
+    await asyncio.gather(*(worker(index) for index in range(slots)))
+    return results
+
+
 async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]], dict[str, Any]]:
     source_pcm = load_wav(args.wav)
     source_audio_seconds = len(source_pcm) / (SAMPLE_RATE * SAMPLE_WIDTH)
@@ -443,13 +511,64 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
         upload_path = Path(temp_dir.name) / "repeated-input.wav"
         write_repeated_wav(upload_path, source_pcm, args.repeats)
     await sampler.start()
+    file_jobs_by_tier: dict[str, int] = {}
     try:
         for level in args.concurrency:
             run_tag = f"c{level}-{uuid.uuid4().hex[:8]}"
+            file_slots = level if args.mode == "file" else (
+                args.file_concurrency if args.mode == "mixed" else 0
+            )
+            if args.tier_duration_seconds is None:
+                # Preserve the original one-batch behavior unless continuous
+                # tiers are explicitly requested.
+                tasks = []
+                if args.mode in {"realtime", "mixed"}:
+                    for index in range(level):
+                        tasks.append(run_live_session(
+                            pcm=pcm,
+                            endpoint=args.ws_url or ws_url(args.base_url),
+                            run_id=f"{run_tag}-live-{index + 1}",
+                            frame_ms=args.frame_ms,
+                            hotword_set_id=args.hotword_set_id,
+                            speaker_scope=args.speaker_scope,
+                            token=args.token,
+                            timeout_seconds=args.timeout,
+                            concurrency_tier=level,
+                            start_delay_seconds=index * args.start_stagger_ms / 1000,
+                        ))
+                for index in range(file_slots):
+                    tasks.append(run_file_job(
+                        path=upload_path,
+                        audio_seconds=audio_seconds,
+                        base_url=args.base_url,
+                        run_id=f"{run_tag}-file-{index + 1}",
+                        hotword_set_id=args.hotword_set_id,
+                        token=args.token,
+                        poll_seconds=args.poll_interval,
+                        timeout_seconds=args.timeout,
+                    ))
+                batch = await asyncio.gather(*tasks)
+                for item in batch:
+                    if item.mode == "file":
+                        item.audio_seconds = audio_seconds
+                        file_jobs_by_tier[str(level)] = file_jobs_by_tier.get(str(level), 0) + 1
+                    results.append(item)
+                continue
+
+            tier_duration = args.tier_duration_seconds
+            tier_started = time.monotonic()
+            deadline = tier_started + tier_duration
             tasks = []
             if args.mode in {"realtime", "mixed"}:
                 for index in range(level):
-                    tasks.append(run_live_session(
+                    start_delay = index * args.start_stagger_ms / 1000
+                    if start_delay >= tier_duration:
+                        raise ValueError(
+                            "start stagger places a realtime session beyond its tier duration"
+                        )
+                    session_duration = tier_duration - start_delay
+                    session_repeats = max(1, math.ceil(session_duration / audio_seconds))
+                    tasks.append(asyncio.create_task(run_live_session(
                         pcm=pcm,
                         endpoint=args.ws_url or ws_url(args.base_url),
                         run_id=f"{run_tag}-live-{index + 1}",
@@ -459,29 +578,34 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
                         token=args.token,
                         timeout_seconds=args.timeout,
                         concurrency_tier=level,
-                    ))
-            if args.mode == "file":
-                file_count = level
-            elif args.mode == "mixed":
-                file_count = args.file_concurrency
-            else:
-                file_count = 0
-            for index in range(file_count):
-                tasks.append(run_file_job(
+                        repeat_count=session_repeats,
+                        max_audio_seconds=session_duration,
+                        start_delay_seconds=start_delay,
+                    )))
+            if file_slots:
+                file_task = asyncio.create_task(_run_continuous_file_tier(
+                    slots=file_slots,
+                    duration_seconds=tier_duration,
+                    max_jobs=args.max_file_jobs_per_tier,
+                    deadline=deadline,
                     path=upload_path,
                     audio_seconds=audio_seconds,
                     base_url=args.base_url,
-                    run_id=f"{run_tag}-file-{index + 1}",
+                    run_tag=run_tag,
                     hotword_set_id=args.hotword_set_id,
                     token=args.token,
                     poll_seconds=args.poll_interval,
                     timeout_seconds=args.timeout,
+                    concurrency_tier=level,
                 ))
+                tasks.append(file_task)
             batch = await asyncio.gather(*tasks)
             for item in batch:
-                if item.mode == "file":
-                    item.audio_seconds = audio_seconds
-                results.append(item)
+                if isinstance(item, list):
+                    results.extend(item)
+                    file_jobs_by_tier[str(level)] = len(item)
+                else:
+                    results.append(item)
     finally:
         await sampler.stop()
         temp_dir.cleanup()
@@ -494,6 +618,10 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
         "speaker_scope": args.speaker_scope,
         "wav": {"name": args.wav.name, "sha256": sha256_file(args.wav)},
         "repeats": args.repeats,
+        "tier_duration_seconds": args.tier_duration_seconds,
+        "max_file_jobs_per_tier": args.max_file_jobs_per_tier,
+        "file_jobs_by_concurrency_tier": file_jobs_by_tier,
+        "start_stagger_ms": args.start_stagger_ms,
         "source_audio_seconds": source_audio_seconds,
         "audio_seconds": audio_seconds,
         "wall_elapsed_seconds": time.monotonic() - run_started,
@@ -536,6 +664,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-ms", type=int, default=40, choices=(20, 40, 60, 80, 100))
     parser.add_argument("--repeats", type=int, default=1, help="repeat the authorized input clip to sustain longer runs")
     parser.add_argument("--file-concurrency", type=int, default=1, help="file jobs alongside each mixed-load level")
+    parser.add_argument(
+        "--tier-duration-seconds", type=float,
+        help="run each file/mixed/realtime concurrency tier for this duration; continuously resubmit file jobs",
+    )
+    parser.add_argument(
+        "--max-file-jobs-per-tier", type=int, default=1000,
+        help="hard cap on file submissions in a continuous tier (prevents unbounded result growth)",
+    )
+    parser.add_argument(
+        "--start-stagger-ms", type=float, default=0,
+        help="delay each additional realtime session start by this many milliseconds",
+    )
     parser.add_argument("--hotword-set-id", help="hotword set used for every run")
     parser.add_argument("--speaker-scope", help="registered speaker/library scope passed to stream start")
     parser.add_argument("--token", help="bearer token; prefer ASR_API_TOKEN environment variable")
@@ -575,6 +715,10 @@ def main() -> int:
     if (
         args.file_concurrency < 1 or args.repeats < 1 or args.timeout <= 0
         or args.poll_interval <= 0 or args.resource_interval <= 0
+        or args.max_file_jobs_per_tier < 1 or not math.isfinite(args.start_stagger_ms)
+        or args.start_stagger_ms < 0
+        or (args.tier_duration_seconds is not None and
+            (not math.isfinite(args.tier_duration_seconds) or args.tier_duration_seconds <= 0))
         or not 0 <= args.max_error_rate <= 1
         or min(args.max_first_partial_p95, args.max_completion_after_stop_p95, args.max_backlog, args.max_server_drops) < 0
     ):

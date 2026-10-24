@@ -1,13 +1,15 @@
 import asyncio
 import json
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from loadtest.core import (SessionResult, aggregate_final_speaker_events, evaluate_gates,
                            pace_pcm, percentile, summarize, write_report)
-from loadtest.runner import build_parser, load_wav, run_file_job, run_live_session, write_repeated_wav
+from loadtest.runner import (_run_continuous_file_tier, build_parser, load_wav, run,
+                            run_file_job, run_live_session, write_repeated_wav)
 
 
 def test_percentile_uses_linear_interpolation_and_empty_values():
@@ -282,6 +284,203 @@ def test_pcm_pacing_tracks_audio_timeline_and_client_backlog():
     assert metrics["client_late_frames"] == 0
 
 
+def test_pcm_pacing_repeats_without_expanding_and_truncates_at_tier_duration():
+    class FakeClock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        async def sleep(self, duration):
+            self.now += duration
+
+    async def scenario():
+        clock = FakeClock()
+        frames = []
+
+        async def send(frame):
+            frames.append(frame)
+
+        result = await pace_pcm(
+            b"a" * 320, send, frame_ms=20, clock=clock.monotonic,
+            sleep=clock.sleep, repeat_count=10, max_audio_seconds=0.055,
+        )
+        return result, frames
+
+    metrics, frames = asyncio.run(scenario())
+    assert [len(frame) for frame in frames] == [640, 640, 480]
+    assert b"".join(frames) == (b"a" * 320) * 5 + (b"a" * 160)
+    assert metrics["frames_sent"] == 3
+    assert metrics["audio_seconds"] == pytest.approx(0.055)
+
+
+def test_continuous_file_tier_bounds_parallelism_duration_and_total_jobs(tmp_path):
+    class FakeClock:
+        now = 100.0
+
+        def monotonic(self):
+            return self.now
+
+    clock = FakeClock()
+    active = 0
+    peak = 0
+    starts = []
+
+    async def fake_job(**kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        starts.append((kwargs["run_id"], clock.now))
+        index = int(kwargs["run_id"].rsplit("-", 1)[1])
+        await asyncio.sleep(0)
+        clock.now += 0.01
+        active -= 1
+        return SessionResult(
+            kwargs["run_id"], "file", completed=index % 2 == 1,
+            error="fake failure" if index % 2 == 0 else "",
+            queue_seconds=0.1, processing_seconds=0.2,
+        )
+
+    results = asyncio.run(_run_continuous_file_tier(
+        slots=2, duration_seconds=0.025, max_jobs=100, deadline=100.025,
+        path=tmp_path / "fake.wav", audio_seconds=1.0, base_url="http://fake",
+        run_tag="tier", hotword_set_id=None, token=None, poll_seconds=0.1,
+        timeout_seconds=1.0, concurrency_tier=2, job_runner=fake_job,
+        clock=clock.monotonic,
+    ))
+
+    assert 2 <= len(results) < 100
+    assert peak <= 2 and active == 0
+    assert all(start_time < 100.025 for _, start_time in starts)
+    assert len({run_id for run_id, _ in starts}) == len(results)
+    assert sum(item.completed for item in results) + sum(bool(item.error) for item in results) == len(results)
+    assert all(item.concurrency_tier == 2 for item in results)
+    assert all(item.queue_seconds == 0.1 and item.processing_seconds == 0.2 for item in results)
+
+
+def test_mixed_continuous_tier_runs_live_and_file_load_together(monkeypatch, tmp_path):
+    wav = tmp_path / "short.wav"
+    write_repeated_wav(wav, bytes(320), 1)
+    live_active = 0
+    file_active = 0
+    peak_files = 0
+    observed_overlap = []
+
+    class FakeSampler:
+        def __init__(self, *_args): self.samples = []
+        async def start(self): pass
+        async def stop(self): pass
+
+    async def fake_live(**kwargs):
+        nonlocal live_active
+        live_active += 1
+        result = SessionResult(kwargs["run_id"], "realtime", completed=True,
+                               audio_seconds=kwargs["max_audio_seconds"],
+                               concurrency_tier=kwargs["concurrency_tier"])
+        await asyncio.sleep(kwargs["max_audio_seconds"])
+        live_active -= 1
+        return result
+
+    async def fake_file(**kwargs):
+        nonlocal file_active, peak_files
+        file_active += 1
+        peak_files = max(peak_files, file_active)
+        observed_overlap.append(live_active > 0)
+        await asyncio.sleep(0.003)
+        index = int(kwargs["run_id"].rsplit("-", 1)[1])
+        file_active -= 1
+        return SessionResult(kwargs["run_id"], "file", completed=index % 2 == 0,
+                             error="fake failure" if index % 2 else "",
+                             queue_seconds=0.02, processing_seconds=0.03)
+
+    monkeypatch.setattr("loadtest.runner.ResourceSampler", FakeSampler)
+    monkeypatch.setattr("loadtest.runner.run_live_session", fake_live)
+    monkeypatch.setattr("loadtest.runner.run_file_job", fake_file)
+    args = build_parser().parse_args([
+        "--wav", str(wav), "--mode", "mixed", "--concurrency", "2",
+        "--file-concurrency", "2", "--tier-duration-seconds", "0.03",
+        "--max-file-jobs-per-tier", "4",
+    ])
+    results, samples, config = asyncio.run(run(args))
+
+    live = [item for item in results if item.mode == "realtime"]
+    files = [item for item in results if item.mode == "file"]
+    assert len(live) == 2
+    assert len(files) == 4
+    assert peak_files <= 2 and file_active == 0 and live_active == 0
+    assert all(observed_overlap)
+    assert all(item.concurrency_tier == 2 for item in results)
+    assert all(item.queue_seconds == 0.02 and item.processing_seconds == 0.03 for item in files)
+    assert samples == []
+    assert config["tier_duration_seconds"] == 0.03
+    assert config["max_file_jobs_per_tier"] == 4
+    assert config["file_jobs_by_concurrency_tier"]["2"] == len(files)
+
+
+def test_continuous_realtime_stagger_keeps_sessions_inside_tier(monkeypatch, tmp_path):
+    wav = tmp_path / "short.wav"
+    write_repeated_wav(wav, bytes(320), 1)
+    starts = []
+
+    class FakeSampler:
+        def __init__(self, *_args): self.samples = []
+        async def start(self): pass
+        async def stop(self): pass
+
+    async def fake_live(**kwargs):
+        await asyncio.sleep(kwargs["start_delay_seconds"])
+        starts.append((time.monotonic(), kwargs["max_audio_seconds"]))
+        await asyncio.sleep(kwargs["max_audio_seconds"])
+        return SessionResult(kwargs["run_id"], "realtime", completed=True,
+                             audio_seconds=kwargs["max_audio_seconds"])
+
+    monkeypatch.setattr("loadtest.runner.ResourceSampler", FakeSampler)
+    monkeypatch.setattr("loadtest.runner.run_live_session", fake_live)
+    args = build_parser().parse_args([
+        "--wav", str(wav), "--mode", "realtime", "--concurrency", "3",
+        "--tier-duration-seconds", "0.05", "--start-stagger-ms", "10",
+    ])
+    results, _samples, _config = asyncio.run(run(args))
+
+    assert len(results) == 3
+    starts.sort(key=lambda row: row[0])
+    assert starts[1][0] - starts[0][0] == pytest.approx(0.01, abs=0.01)
+    assert starts[2][0] - starts[1][0] == pytest.approx(0.01, abs=0.01)
+    assert [duration for _, duration in starts] == pytest.approx([0.05, 0.04, 0.03])
+
+
+def test_continuous_realtime_rejects_stagger_outside_tier(monkeypatch, tmp_path):
+    wav = tmp_path / "short.wav"
+    write_repeated_wav(wav, bytes(320), 1)
+
+    class FakeSampler:
+        def __init__(self, *_args): self.samples = []
+        async def start(self): pass
+        async def stop(self): pass
+
+    monkeypatch.setattr("loadtest.runner.ResourceSampler", FakeSampler)
+    args = build_parser().parse_args([
+        "--wav", str(wav), "--mode", "realtime", "--concurrency", "3",
+        "--tier-duration-seconds", "0.01", "--start-stagger-ms", "10",
+    ])
+    with pytest.raises(ValueError, match="beyond its tier duration"):
+        asyncio.run(run(args))
+
+
+def test_continuous_cli_options_are_opt_in():
+    args = build_parser().parse_args(["--wav", "sample.wav"])
+    assert args.tier_duration_seconds is None
+    assert args.max_file_jobs_per_tier == 1000
+    assert args.start_stagger_ms == 0
+    continuous = build_parser().parse_args([
+        "--wav", "sample.wav", "--tier-duration-seconds", "600",
+        "--max-file-jobs-per-tier", "200", "--start-stagger-ms", "250",
+    ])
+    assert continuous.tier_duration_seconds == 600
+    assert continuous.max_file_jobs_per_tier == 200
+    assert continuous.start_stagger_ms == 250
+
+
 def test_repeated_pcm_can_be_wrapped_as_uploadable_wav(tmp_path):
     pcm = bytes(160 * 2)
     wav_path = tmp_path / "repeated.wav"
@@ -305,6 +504,26 @@ def test_summary_counts_errors_and_computes_latency_percentiles():
     assert summary["server_drop_telemetry_coverage"] == {"reported": 0, "sessions": 2}
     assert summary["latency_seconds"]["first_partial"]["p50"] == pytest.approx(0.15)
     assert summary["latency_seconds"]["final_text"]["p50"] == pytest.approx(0.3)
+    assert summary["latency_seconds"]["first_final_segment"]["p50"] == pytest.approx(0.3)
+
+
+def test_first_final_segment_metric_is_named_and_legacy_fields_remain_compatible(tmp_path):
+    item = SessionResult(
+        "named-final", "realtime", completed=True, final_text_seconds=8.0,
+        first_final_segment_seconds=8.0,
+    )
+    summary = summarize([item])
+    assert summary["latency_seconds"]["first_final_segment"]["p50"] == 8.0
+    assert summary["latency_seconds"]["final_text"]["p50"] == 8.0
+    report_json, report_csv = write_report(
+        tmp_path, config={"thresholds": {}}, results=[item], resource_samples=[],
+    )
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["sessions"][0]["first_final_segment_seconds"] == 8.0
+    assert report["sessions"][0]["final_text_seconds"] == 8.0
+    csv_header = report_csv.read_text(encoding="utf-8-sig").splitlines()[0]
+    assert "first_final_segment_seconds" in csv_header
+    assert "final_text_seconds" in csv_header
 
 
 def test_structured_live_diagnostics_are_summarized_and_reported_additively(tmp_path):
