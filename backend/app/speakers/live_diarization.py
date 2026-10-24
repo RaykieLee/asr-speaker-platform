@@ -111,8 +111,43 @@ class LiveSpeakerTracker:
         return events
 
     def flush(self, end_sample: int) -> list[dict[str, Any]]:
-        # Deliberately do not infer identity from an undersized tail window.
-        return []
+        """Use one final, right-aligned overlapping window to settle a pending change.
+
+        The last regular window can leave exactly one candidate confirmation in
+        ``pending`` when a stream ends before the next hop. Recheck a full-sized
+        tail window only when it advances by at least half a hop; this preserves
+        the normal confirmation count without treating a tiny residual as new
+        evidence. A first identity is not established at flush time because it
+        could retroactively label an earlier, different speaker.
+        """
+        buffered_end = self.base_sample + len(self.samples)
+        processed_end = self.base_sample + self.processed
+        effective_end = min(max(0, end_sample), buffered_end)
+        if (not self.available or effective_end - processed_end < max(1, self.step_samples // 2)
+                or self.pending is None or self.pending_count < 1
+                or not (self.current.local_speaker_id or self.current.registered_speaker_id)):
+            return []
+
+        right = effective_end - self.base_sample
+        left = max(0, right - self.window_samples)
+        window = self.samples[left:right]
+        if len(window) < self.min_speech_samples or not self._is_speech(window):
+            return []
+        candidate = self._identify(window)
+        if candidate != self.pending:
+            return []
+
+        absolute_left = self.base_sample + left
+        if effective_end - self.current_since < self.min_dwell_samples:
+            return []
+        previous = self.current
+        self.current = candidate
+        self.current_since = effective_end
+        self.pending, self.pending_count = None, 0
+        return [{"type": "speaker_change", "start": absolute_left / self.sample_rate,
+                 "end": effective_end / self.sample_rate,
+                 "previous": self._as_dict(previous), "speaker": self._as_dict(candidate),
+                 "confirmed_at": end_sample / self.sample_rate}]
 
     def _is_speech(self, samples: Sequence[float]) -> bool:
         try:

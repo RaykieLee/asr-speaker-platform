@@ -142,9 +142,16 @@ class LiveASRSession:
         if self.closed:
             return []
         self.closed = True
+        events: list[dict[str, Any]] = []
+        speaker_changes = self.speaker_tracker.flush(self.samples_seen)
+        speaker_changes = [change for change in speaker_changes
+                           if (change.get("previous", {}).get("local_speaker_id") or
+                               change.get("previous", {}).get("registered_speaker_id"))]
+        for change in speaker_changes:
+            events.extend(self._split_at_speaker_change(change))
         self.stream.input_finished()
-        self.speaker_tracker.flush(self.samples_seen)
-        return self._decode(self.duration, self.duration, final=True)
+        events.extend(self._decode(self.duration, self.duration, final=True))
+        return events
 
     def _decode(self, start: float, end: float, *, final: bool) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []

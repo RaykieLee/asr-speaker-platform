@@ -105,6 +105,71 @@ def test_continuous_speech_switch_uses_hysteresis_and_stable_mapping():
     assert extractor.calls >= 4
 
 
+def test_flush_rechecks_final_overlapping_window_to_confirm_pending_switch():
+    state = tracker(window_seconds=1, step_seconds=0.5, min_speech_seconds=0.5,
+                    min_dwell_seconds=0.5, confirmations=2)
+    audio = array.array("f", [1.0] * 32_000 + [-1.0] * 20_800)
+
+    regular = state.feed(audio, len(audio))
+    assert state.current.registered_speaker_id == "registered_a"
+    assert state.pending_count == 1
+    assert not any(change["speaker"]["registered_speaker_id"] == "registered_b"
+                   for change in regular)
+
+    flushed = state.flush(len(audio))
+
+    assert len(flushed) == 1
+    assert flushed[0]["previous"]["registered_speaker_id"] == "registered_a"
+    assert flushed[0]["speaker"]["registered_speaker_id"] == "registered_b"
+    assert flushed[0]["start"] == 2.3
+    assert flushed[0]["confirmed_at"] == 3.3
+    assert state.current.registered_speaker_id == "registered_b"
+    assert state.pending is None
+
+
+def test_flush_does_not_promote_first_identity_or_confirm_on_silence():
+    class MutableVAD(FakeVAD):
+        enabled = True
+        def is_speech(self, samples, sample_rate):
+            self.calls += 1
+            return self.enabled
+
+    vad = MutableVAD()
+    state = tracker(vad=vad, window_seconds=1, step_seconds=0.5,
+                    min_speech_seconds=0.5, min_dwell_seconds=0.5, confirmations=2)
+    first_voice = array.array("f", [1.0] * 12_800)
+    state.feed(first_voice, len(first_voice))
+    assert state.current.registered_speaker_id is None
+    assert state.flush(len(first_voice)) == []
+    assert state.current.registered_speaker_id is None
+
+    switched = tracker(vad=vad, window_seconds=1, step_seconds=0.5,
+                       min_speech_seconds=0.5, min_dwell_seconds=0.5, confirmations=2)
+    audio = array.array("f", [1.0] * 32_000 + [-1.0] * 20_800)
+    switched.feed(audio, len(audio))
+    assert switched.pending_count == 1
+    vad.enabled = False
+    assert switched.flush(len(audio)) == []
+    assert switched.current.registered_speaker_id == "registered_a"
+
+
+def test_finish_applies_tracker_tail_switch_before_finalizing_asr_segment():
+    live = LiveASRSession(FakeRecognizer(), options=StartOptions(),
+                          speaker_tracker=tracker(window_seconds=1, step_seconds=0.5,
+                                                   min_speech_seconds=0.5,
+                                                   min_dwell_seconds=0.5, confirmations=2))
+    live.feed((b"\xff\x7f") * 32_000 + (b"\x01\x80") * 20_800)
+
+    final_events = [event for event in live.finish() if event["status"] == "final"]
+
+    assert [event["registered_speaker_id"] for event in final_events] == [
+        "registered_a", "registered_b",
+    ]
+    assert [event["text"] for event in final_events] == ["甲的识别文本", "乙的识别文本"]
+    assert final_events[0]["end"] == final_events[1]["start"]
+    assert final_events[0]["segment_id"] != final_events[1]["segment_id"]
+
+
 def test_short_utterance_stays_unknown_without_embedding():
     extractor = FakeExtractor()
     state = tracker(extractor=extractor)
