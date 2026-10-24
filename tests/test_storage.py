@@ -1,6 +1,7 @@
 """Storage contract tests: migrations, persistence, relationships and file safety."""
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -152,6 +153,53 @@ def test_file_store_atomic_operations_and_path_traversal_rejection(tmp_path):
         with pytest.raises(UnsafeStoragePath):
             files.delete(path)
     assert outside.read_text() == "safe"
+
+
+def test_file_store_creates_private_root_nested_directories_and_atomic_files(tmp_path, monkeypatch):
+    from backend.app.storage import files as files_module
+
+    root = tmp_path / "new" / "objects"
+    files = FileStore(root)
+    created = files.write("jobs/2026/audio.wav", b"audio payload")
+
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "new").stat().st_mode & 0o777 == 0o700
+    assert (root / "jobs").stat().st_mode & 0o777 == 0o700
+    assert (root / "jobs" / "2026").stat().st_mode & 0o777 == 0o700
+    assert created.stat().st_mode & 0o777 == 0o600
+
+    observed = {}
+    real_replace = files_module.os.replace
+
+    def inspect_temporary(source, destination):
+        observed["mode"] = Path(source).stat().st_mode & 0o777
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(files_module.os, "replace", inspect_temporary)
+    files.write("jobs/2026/second.wav", b"second payload")
+    assert observed["mode"] == 0o600
+
+
+def test_file_store_does_not_change_existing_shared_directories_or_symlink_target(tmp_path):
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir(mode=0o755)
+    shared_root.chmod(0o755)
+    existing = shared_root / "already-shared"
+    existing.mkdir(mode=0o755)
+    existing.chmod(0o755)
+
+    files = FileStore(shared_root)
+    files.write("already-shared/new-branch/payload.bin", b"private file")
+    assert shared_root.stat().st_mode & 0o777 == 0o755
+    assert existing.stat().st_mode & 0o777 == 0o755
+    assert (existing / "new-branch").stat().st_mode & 0o777 == 0o700
+    assert (existing / "new-branch" / "payload.bin").stat().st_mode & 0o777 == 0o600
+
+    alias = tmp_path / "shared-alias"
+    alias.symlink_to(shared_root, target_is_directory=True)
+    FileStore(alias)
+    assert alias.is_symlink()
+    assert shared_root.stat().st_mode & 0o777 == 0o755
 
 
 def test_file_store_rejects_symlink_escape(tmp_path):

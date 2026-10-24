@@ -11,11 +11,12 @@ import tempfile
 from contextlib import closing
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from itertools import chain
 from pathlib import Path, PurePath
 from typing import Any
 
 from .database import SQLiteStore
-from .files import FileStore, UnsafeStoragePath
+from .files import FileStore, UnsafeStoragePath, ensure_private_directories
 
 BACKUP_FORMAT = "asr-local-backup-v1"
 DATABASE_FILENAME = "database.sqlite3"
@@ -29,6 +30,19 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _make_private_tree(root: Path) -> None:
+    """Apply private modes to a newly-created staging tree only."""
+    for item in chain((root,), root.rglob("*")):
+        if item.is_symlink():
+            raise ValueError("staging tree must not contain symbolic links")
+        if item.is_dir():
+            item.chmod(0o700)
+        elif item.is_file():
+            item.chmod(0o600)
+        else:
+            raise ValueError("staging tree contains an unsupported filesystem object")
 
 
 def _utc(value: datetime | None = None) -> datetime:
@@ -180,8 +194,9 @@ def create_backup(database_path: str | Path, files_root: str | Path,
         raise FileExistsError(f"backup destination already exists: {target}")
     if target == source_files or target.is_relative_to(source_files):
         raise ValueError("backup destination must be outside the live file store")
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directories(target.parent)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+    stage.chmod(0o700)
     cutoff = _utc(now) - timedelta(days=retention_days)
     try:
         snapshot_db = stage / DATABASE_FILENAME
@@ -197,15 +212,16 @@ def create_backup(database_path: str | Path, files_root: str | Path,
             snapshot.close()
             source.close()
         files_out = stage / "files"
-        files_out.mkdir()
+        ensure_private_directories(files_out)
         file_entries = []
         for relative, counts in sorted(refs.items()):
             source_file = _safe_relative_path(source_files, relative)
             if not source_file.is_file():
                 raise FileNotFoundError(f"database references missing file: {relative}")
             destination_file = _safe_relative_path(files_out, relative)
-            destination_file.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directories(destination_file.parent)
             shutil.copyfile(source_file, destination_file)
+            destination_file.chmod(0o600)
             file_entries.append({"path": relative, "size_bytes": destination_file.stat().st_size,
                                  "sha256": _sha256(destination_file), "references": counts})
         database_info = {"file": DATABASE_FILENAME, "size_bytes": snapshot_db.stat().st_size,
@@ -219,7 +235,11 @@ def create_backup(database_path: str | Path, files_root: str | Path,
             "database": database_info,
             "files": file_entries,
         }
-        (stage / MANIFEST_FILENAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        manifest_path = stage / MANIFEST_FILENAME
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        manifest_path.chmod(0o600)
+        snapshot_db.chmod(0o600)
+        _make_private_tree(stage)
         verified = _verify_backup_dir(stage)
         os.replace(stage, target)
         return {**verified, "backup_dir": str(target), "expired_terminal_task_references_cleared": expired_count}
@@ -243,12 +263,14 @@ def restore_backup(backup_dir: str | Path, destination: str | Path) -> Path:
         raise ValueError("restore destination and backup tree must not contain one another")
     if target.exists():
         raise FileExistsError(f"restore destination already exists: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directories(target.parent)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.restore-", dir=target.parent))
+    stage.chmod(0o700)
     try:
         shutil.copy2(source / DATABASE_FILENAME, stage / DATABASE_FILENAME)
         shutil.copy2(source / MANIFEST_FILENAME, stage / MANIFEST_FILENAME)
         shutil.copytree(source / "files", stage / "files")
+        _make_private_tree(stage)
         _verify_backup_dir(stage)
         os.replace(stage, target)
         return target

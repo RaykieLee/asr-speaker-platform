@@ -72,6 +72,52 @@ def test_backup_is_manifested_online_pair_and_expires_audio_only_in_snapshot(tmp
     database.close()
 
 
+def test_backup_and_restore_create_private_tree_without_changing_shared_parent(tmp_path):
+    database, files = open_store(tmp_path)
+    relative = "nested/speaker/sample.wav"
+    files.write(relative, b"sample audio")
+    database.create_speaker("Alice", speaker_id="alice")
+    database.create_sample("alice", relative, sample_id="sample", model_version="v1",
+                           embedding=[1.0])
+
+    shared_parent = tmp_path / "shared-backups"
+    shared_parent.mkdir(mode=0o755)
+    shared_parent.chmod(0o755)
+    created_parent = shared_parent / "private-archive"
+    backup = created_parent / "backup"
+    create_backup(database.path, files.root, backup)
+
+    assert shared_parent.stat().st_mode & 0o777 == 0o755
+    assert created_parent.stat().st_mode & 0o777 == 0o700
+    assert backup.stat().st_mode & 0o777 == 0o700
+    for directory in (backup / "files", backup / "files" / "nested",
+                      backup / "files" / "nested" / "speaker"):
+        assert directory.stat().st_mode & 0o777 == 0o700
+    for artifact in (backup / "database.sqlite3", backup / "manifest.json",
+                     backup / "files" / relative):
+        assert artifact.stat().st_mode & 0o777 == 0o600
+
+    # A previously created backup may have broader modes. Restore creates a new
+    # private tree rather than copying those modes into the live data directory.
+    for directory in (backup, backup / "files", backup / "files" / "nested",
+                      backup / "files" / "nested" / "speaker"):
+        directory.chmod(0o755)
+    for artifact in (backup / "database.sqlite3", backup / "manifest.json",
+                     backup / "files" / relative):
+        artifact.chmod(0o644)
+    restored = restore_backup(backup, tmp_path / "new-restore-parent" / "restored")
+    assert (tmp_path / "new-restore-parent").stat().st_mode & 0o777 == 0o700
+    assert restored.stat().st_mode & 0o777 == 0o700
+    for directory in (restored / "files", restored / "files" / "nested",
+                      restored / "files" / "nested" / "speaker"):
+        assert directory.stat().st_mode & 0o777 == 0o700
+    for artifact in (restored / "database.sqlite3", restored / "manifest.json",
+                     restored / "files" / relative):
+        assert artifact.stat().st_mode & 0o777 == 0o600
+    assert (backup / "database.sqlite3").stat().st_mode & 0o777 == 0o644
+    database.close()
+
+
 def test_cleanup_defaults_to_dry_run_then_keeps_shared_and_active_references(tmp_path):
     database, files = open_store(tmp_path)
     now = datetime(2026, 10, 23, tzinfo=timezone.utc)
