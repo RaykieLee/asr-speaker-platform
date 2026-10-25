@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import math
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -32,12 +33,16 @@ _ALLOWED_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm", ".mp4", "
 
 
 def _resolve_hotword_value(resolved: Any) -> tuple[list[str | list[str]], int]:
+    compiled_weight: Any = None
+    has_compiled_weight = False
     if hasattr(resolved, "as_dict"):
         resolved = resolved.as_dict()
     if isinstance(resolved, Mapping):
         version = resolved.get("version")
         compiled = resolved.get("compiled")
         if isinstance(compiled, Mapping) and compiled.get("entries"):
+            has_compiled_weight = "weight" in compiled
+            compiled_weight = compiled.get("weight")
             token_entries = [entry.get("tokens") for entry in compiled["entries"]
                              if isinstance(entry, Mapping)]
             words: Any = token_entries
@@ -65,6 +70,18 @@ def _resolve_hotword_value(resolved: Any) -> tuple[list[str | list[str]], int]:
         raise HotwordSnapshotError("热词集内容无效")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise HotwordSnapshotError("热词集版本必须是正整数")
+    if has_compiled_weight:
+        try:
+            valid_weight = (not isinstance(compiled_weight, bool) and
+                            isinstance(compiled_weight, (int, float)) and
+                            math.isfinite(float(compiled_weight)) and compiled_weight > 0)
+        except (OverflowError, TypeError, ValueError):
+            valid_weight = False
+        if not valid_weight:
+            raise HotwordSnapshotError("热词集权重必须是大于零的有限数字")
+        score_token = f":{float(compiled_weight):g}"
+        words = [list(word) + [score_token] if isinstance(word, (list, tuple)) else word
+                 for word in words]
     return [([token.strip() for token in word] if isinstance(word, (list, tuple)) else word.strip())
             for word in words], version
 

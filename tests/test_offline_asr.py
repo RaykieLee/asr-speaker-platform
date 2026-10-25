@@ -18,7 +18,8 @@ from backend.app.audio.core import AudioBuffer, AudioFormatError
 from backend.app.engines.base import EngineConfigError, ModelArtifact
 from backend.app.engines.sherpa_offline import OfflineTransducerFiles, SherpaOfflineRecognizer
 from backend.app.api.transcriptions import router
-from backend.app.jobs.service import TranscriptionService
+from backend.app.jobs.service import HotwordSnapshotError, TranscriptionService
+from backend.app.jobs.worker import JobWorker
 from backend.app.pipelines.file_asr import FileASRService
 from backend.app.storage import FileStore, SQLiteStore
 
@@ -223,8 +224,9 @@ def test_sherpa_adapter_uses_official_stream_hotword_interface(tmp_path, monkeyp
     model = ModelArtifact("offline", "transducer", "offline-v2", (paths[0],))
     files = OfflineTransducerFiles(*paths[1:])
     adapter = SherpaOfflineRecognizer.load(model, files, decoding_method="modified_beam_search")
-    assert adapter.transcribe([0.1, -0.1], 16_000, ["李子熙", "项目名"]) == "real fake-boundary result"
-    assert calls["hotwords"] == "李 子 熙/项 目 名"
+    assert adapter.transcribe([0.1, -0.1], 16_000,
+                              [["李", "子", "熙", ":3.5"], ["项", "目", "名", ":2"]]) == "real fake-boundary result"
+    assert calls["hotwords"] == "李 子 熙 :3.5/项 目 名 :2"
     assert calls["audio"] == (16_000, [0.1, -0.1])
     assert calls["configuration"]["decoding_method"] == "modified_beam_search"
     assert calls["configuration"]["modeling_unit"] == "cjkchar"
@@ -282,8 +284,9 @@ def test_offline_hotword_format_rejects_unrepresentable_tokens():
 def test_upload_persists_hotword_snapshot_and_query_returns_segments(tmp_path):
     database, files = make_storage(tmp_path)
     hotword_set = database.create_hotword_set(
-        "names", ["李子熙"],
-        compiled={"entries": [{"text": "李子熙", "tokens": ["李", "子", "熙"]}]},
+        "names", ["李子熙"], weight=2.75,
+        compiled={"weight": 2.75,
+                  "entries": [{"text": "李子熙", "tokens": ["李", "子", "熙"]}]},
     )
 
     async def resolve(set_id):
@@ -307,8 +310,8 @@ def test_upload_persists_hotword_snapshot_and_query_returns_segments(tmp_path):
             job = service.worker.wait(created["job_id"], timeout=3)
             assert job["status"] == "succeeded"
             assert job["hotword_version"] == 1
-            assert job["options"]["hotwords"] == [["李", "子", "熙"]]
-            assert recognizer.calls[0][2] == [["李", "子", "熙"]]
+            assert job["options"]["hotwords"] == [["李", "子", "熙", ":2.75"]]
+            assert recognizer.calls[0][2] == [["李", "子", "熙", ":2.75"]]
             assert job["model_version"] == "fake-offline-v1"
             assert files.exists(job["file_path"])
             queried = client.get(created["status_url"])
@@ -319,6 +322,66 @@ def test_upload_persists_hotword_snapshot_and_query_returns_segments(tmp_path):
             assert result["segments"][0]["start_seconds"] == 0
             assert result["segments"][0]["end_seconds"] == pytest.approx(0.25)
             assert result["result_metadata"]["speaker_diarization"] == "disabled"
+    finally:
+        service.close()
+        database.close()
+
+
+def test_queued_job_keeps_compiled_weight_after_set_update_and_worker_restart(tmp_path):
+    database, files = make_storage(tmp_path)
+    first = database.create_hotword_set(
+        "weighted", ["旧词"], weight=1.25,
+        compiled={"weight": 1.25,
+                  "entries": [{"text": "旧词", "tokens": ["旧", "词"]}]},
+    )
+
+    def resolve(set_id):
+        return database.get_hotword_version(set_id)
+
+    service = TranscriptionService(
+            database, files, None, hotword_resolver=resolve, worker_mode="external",
+    )
+    worker = None
+    try:
+        job = asyncio.run(service.create_job(
+            wav_bytes(), "queued.wav", hotword_set_id=first["set_id"],
+        ))
+        assert job["options"]["hotwords"] == [["旧", "词", ":1.25"]]
+        database.append_hotword_version(
+            first["set_id"], ["新词"], expected_version=1, weight=4.5,
+            compiled={"weight": 4.5,
+                      "entries": [{"text": "新词", "tokens": ["新", "词"]}]},
+        )
+
+        recognizer = FakeRecognizer()
+        worker = JobWorker(database, files, FileASRService(recognizer))
+        worker.start()
+        completed = worker.wait(job["id"], timeout=3)
+        assert completed["status"] == "succeeded"
+        assert completed["options"]["hotwords"] == [["旧", "词", ":1.25"]]
+        assert recognizer.calls[0][2] == [["旧", "词", ":1.25"]]
+    finally:
+        if worker is not None:
+            worker.close()
+        service.close()
+        database.close()
+
+
+@pytest.mark.parametrize("weight", [0, -1, float("nan"), float("inf"), "2.5", True])
+def test_compiled_hotword_snapshot_rejects_invalid_weight(tmp_path, weight):
+    database, files = make_storage(tmp_path)
+    service = TranscriptionService(
+        database, files, None,
+        hotword_resolver=lambda _set_id: {
+            "version": 1,
+            "compiled": {"weight": weight,
+                         "entries": [{"tokens": ["词"]}]},
+        },
+        worker_mode="external",
+    )
+    try:
+        with pytest.raises(HotwordSnapshotError, match="权重"):
+            asyncio.run(service.create_job(wav_bytes(), "invalid.wav", hotword_set_id="set"))
     finally:
         service.close()
         database.close()
