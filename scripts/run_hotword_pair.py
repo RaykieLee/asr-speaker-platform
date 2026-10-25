@@ -51,8 +51,8 @@ def parse_hotword(value: str) -> tuple[str, float]:
         except ValueError as exc:
             raise ValueError(f"hotword score must be numeric in {value!r}") from exc
     phrase = phrase.strip()
-    if not phrase or not math.isfinite(score) or score <= 0:
-        raise ValueError(f"hotword must have text and a finite positive score: {value!r}")
+    if not phrase or not math.isfinite(score) or not 0 < score <= 20:
+        raise ValueError(f"hotword must have text and a score in (0, 20]: {value!r}")
     return phrase, score
 
 
@@ -116,10 +116,13 @@ def _compile_hotwords(model_dir: Path, requested: list[str]) -> tuple[list[dict[
         result = compiler.compile([{"word": phrase}], weight=1.0)
         item = result["entries"][0]
         compiled.append({"phrase": phrase, "tokens": item["tokens"], "score": score})
+    return compiled, _format_hotwords(compiled)
+
+
+def _format_hotwords(compiled: list[dict[str, Any]]) -> list[str]:
     # sherpa's dynamic offline hotword grammar accepts per-phrase trailing
-    # scores: TOKEN TOKEN:score/OTHER:score.
-    encoded = [" ".join(item["tokens"]) + f":{item['score']:g}" for item in compiled]
-    return compiled, encoded
+    # scores as a separate final item: TOKEN TOKEN :score/OTHER :score.
+    return [" ".join(item["tokens"]) + f" :{item['score']:g}" for item in compiled]
 
 
 def _new_recognizer(model_dir: Path, *, threads: int, provider: str) -> Any:
@@ -150,6 +153,7 @@ def run_pair(wav_path: Path, annotation_path: Path, output_dir: Path, *,
              now: Callable[[], float] = time.perf_counter) -> dict[str, Any]:
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.chmod(0o700)
     raw_paths = [output_dir / "disabled.raw.json", output_dir / "enabled.raw.json"]
     manifest_path = output_dir / "manifest.json"
     if not overwrite and any(path.exists() for path in [*raw_paths, manifest_path]):
@@ -168,6 +172,10 @@ def run_pair(wav_path: Path, annotation_path: Path, output_dir: Path, *,
     if not isinstance(targets, list) or any(not isinstance(term, str) for term in targets):
         raise ValueError("annotation hotword_targets must be an array of strings")
     compiled, encoded = _compile_hotwords(model_dir, hotword_args)
+    requested_terms = {normalize_zh(item["phrase"]) for item in compiled}
+    annotated_terms = {normalize_zh(term) for term in targets}
+    if requested_terms != annotated_terms:
+        raise ValueError("annotation hotword_targets must exactly match the requested --hotword phrases")
 
     modes: dict[str, Any] = {}
     run_metadata: dict[str, Any] = {}
@@ -216,7 +224,9 @@ def run_pair(wav_path: Path, annotation_path: Path, output_dir: Path, *,
         raw_paths[index].write_text(
             json.dumps({"mode": mode, "text": raw_hypotheses[mode]}, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8")
+        raw_paths[index].chmod(0o600)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    manifest_path.chmod(0o600)
     return manifest
 
 
