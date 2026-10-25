@@ -44,6 +44,29 @@ uv run python -m evaluation.quality \
 
 Store `data/private-eval/` outside Git. Human labels and ASR transcripts can contain personal or confidential speech: use authorized recordings, restrict access, redact names/IDs where appropriate, and do not commit raw recordings, transcripts, or reports containing sensitive metadata. Reports contain aggregate metrics only and do not copy transcript text.
 
+## Reproducible local model replay
+
+`scripts/run_diarization_quality.py` runs the repository's offline Transducer recognizer, Sherpa speaker diarizer, registered-speaker matcher, and `evaluation.quality` against one local WAV and annotation. It writes `result.json`, `metrics.json`, and `run-manifest.json` into the requested output directory. The manifest records the actual diarization threshold and speaker count, model version identifiers, absolute input paths and SHA-256 hashes, plus hashes for the result and metrics files. The registration database is opened with SQLite `mode=ro`; the command does not initialize or modify it. It writes only to `--output-dir`.
+
+The ASR directory must contain exactly one `encoder*.onnx`, `decoder*.onnx`, `joiner*.onnx`, and `tokens.txt`; `bpe.vocab` is used when present. For example, use an AISHELL-4 two-person interval already exported as WAV and manually annotated using the schema above:
+
+```sh
+PYTHONPATH=. .venv/bin/python scripts/run_diarization_quality.py \
+  --audio /data/aishell4/two-person.wav \
+  --annotation /data/aishell4/two-person.annotation.json \
+  --registry /var/lib/asr/speakers.sqlite3 \
+  --asr-model-dir /opt/asr/models/offline-multi \
+  --asr-version offline-multi-pinned-version \
+  --segmentation-model /opt/asr/models/pyannote/model.onnx \
+  --speaker-model /opt/asr/models/3dspeaker/model.onnx \
+  --speaker-model-version 3dspeaker-eres2net-zh-cn-pinned-version \
+  --cluster-threshold 0.7 \
+  --num-speakers 2 \
+  --output-dir /data/aishell4/replay-output
+```
+
+Keep source recordings, annotation, registration database, predictions, and generated artifacts outside Git. A rerun is comparable only when its input/model hashes and all manifest parameters match the baseline; the manifest preserves the exact threshold and speaker count for independent inspection. The command exits nonzero and prints the failure to stderr when input validation, model loading, inference, or metric evaluation fails.
+
 ## Public AISHELL-4 clip workflow
 
 The helper scripts below accept an AISHELL-4 FLAC recording and its Praat TextGrid. Obtain both files from the official AISHELL-4 distribution and follow that distribution's access and use terms. Keep the downloaded corpus, generated clip, annotations, platform output JSON, and metrics outside Git.
