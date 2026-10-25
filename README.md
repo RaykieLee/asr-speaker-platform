@@ -83,6 +83,8 @@ python -m loadtest --base-url http://127.0.0.1:8000 \
 
 人工标注的质量基线可用 [质量评估工具](evaluation/README.md) 计算 CER/WER、说话人时间误差、换人边界、注册命中/未知误认和热词启停对照。没有相应人工标注时工具会标记“不可评估”。
 
+已使用 AISHELL-4 公开真实会议录音完成一轮短片段质量基线：文件 ASR 的三个无重叠窗口合计 CER 为 27.08%，热词启停同为 27.08%；同源 66 秒单路流式窗口热词启停 CER 均为 17.27%；两个多人窗口的自动人数 DER-like 为约 29–30%，提前注册人员的按时长命中率为约 52–65%。这些是本机、指定模型和单场会议的探索性结果，见 [AISHELL-4 质量报告](reports/public-quality-aishell4-2026-10-25.md)，不能外推到业务录音。
+
 ## Linux container setup
 
 Install Docker Engine with the Compose plugin. Download the model files on the host as shown above, then build and start the container:
