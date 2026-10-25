@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +29,8 @@ def test_metrics_are_computed_and_local_speaker_ids_are_permutation_invariant():
     result = evaluate(annotation, output)["metrics"]
     assert result["cer"]["value"] == pytest.approx(0.5)
     assert result["wer"]["value"] == pytest.approx(0.5)
+    assert result["cer"]["overlap_seconds"] == 0
+    assert result["wer"]["overlap_seconds"] == 0
     assert result["der_like"]["value"] == 0
     assert result["registered_hit_rate"]["value"] == 1
     assert result["unknown_false_attribution_rate"]["value"] == 1
@@ -94,12 +97,61 @@ def test_reference_overlap_is_excluded_and_reported_not_scored_as_single_speaker
         {"start": 0.5, "end": 1.5, "text": "B", "local_speaker_id": "b", "registered_speaker_id": "reg-b"},
     ]}
     metrics = evaluate(annotation, output)["metrics"]
+    assert metrics["cer"]["status"] == "not_evaluable_overlapping_reference"
+    assert metrics["cer"]["value"] is None
+    assert metrics["cer"]["errors"] is None
+    assert metrics["cer"]["overlap_seconds"] == pytest.approx(0.5)
+    assert metrics["wer"]["status"] == "not_evaluable_overlapping_reference"
+    assert metrics["wer"]["value"] is None
+    assert metrics["wer"]["errors"] is None
+    assert metrics["wer"]["overlap_seconds"] == pytest.approx(0.5)
     assert metrics["der_like"]["value"] == 0
     assert metrics["der_like"]["reference_speech_seconds"] == 1
     assert metrics["der_like"]["excluded_overlap_seconds"] == pytest.approx(0.5)
     assert metrics["registered_hit_rate"]["registered_reference_seconds"] == 1
     assert metrics["boundary_error_seconds"]["value"] is None
     assert metrics["boundary_error_seconds"]["status"] == "not_evaluable_reference_overlap"
+
+
+@pytest.mark.parametrize("annotation_name", ["meeting-2spk.annotation.json", "meeting-3spk.annotation.json"])
+def test_real_aishell4_overlapping_reference_makes_global_transcript_metrics_unavailable(annotation_name):
+    annotation_path = Path(__file__).resolve().parents[1] / "data" / "datasets" / "aishell4" / annotation_name
+    if not annotation_path.is_file():
+        pytest.skip("local AISHELL-4 evaluation annotations are not present")
+    annotation = json.loads(annotation_path.read_text(encoding="utf-8"))
+    output = {"segments": [
+        {"start_seconds": segment["start"], "end_seconds": segment["end"],
+         "text": segment["text"], "local_speaker_id": segment["speaker_id"]}
+        for segment in annotation["segments"]
+    ]}
+
+    metrics = evaluate(annotation, output)["metrics"]
+    assert metrics["cer"]["status"] == "not_evaluable_overlapping_reference"
+    assert metrics["cer"]["value"] is None
+    assert metrics["cer"]["errors"] is None
+    assert metrics["cer"]["overlap_seconds"] > 0
+    assert metrics["wer"]["status"] == "not_evaluable_overlapping_reference"
+    assert metrics["wer"]["value"] is None
+    assert metrics["wer"]["errors"] is None
+    assert metrics["wer"]["overlap_seconds"] == metrics["cer"]["overlap_seconds"]
+    assert metrics["der_like"]["status"] == "evaluated"
+
+
+def test_real_single_speaker_aishell4_transcript_metrics_remain_evaluable():
+    root = Path(__file__).resolve().parents[1] / "data" / "datasets" / "aishell4"
+    annotation_path = root / "asr-hotword.annotation.json"
+    output_path = root / "asr-hotword-on.result.json"
+    if not annotation_path.is_file() or not output_path.is_file():
+        pytest.skip("local AISHELL-4 single-speaker evaluation files are not present")
+    annotation = json.loads(annotation_path.read_text(encoding="utf-8"))
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+
+    metrics = evaluate(annotation, output)["metrics"]
+    assert metrics["cer"]["status"] == "evaluated"
+    assert metrics["cer"]["value"] is not None
+    assert metrics["cer"]["overlap_seconds"] == 0
+    assert metrics["wer"]["status"] == "not_evaluable_empty_reference"
+    assert metrics["wer"]["overlap_seconds"] == 0
 
 
 def test_unequal_speaker_cardinality_matches_best_overlapping_output_id():

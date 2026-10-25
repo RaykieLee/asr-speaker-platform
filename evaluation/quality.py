@@ -70,6 +70,26 @@ def _rate(errors: int, total: int) -> dict[str, Any]:
             "status": "evaluated" if total else "not_evaluable_empty_reference"}
 
 
+def _reference_overlap_seconds(ref: list[dict[str, Any]]) -> float:
+    """Duration where two or more annotated reference segments are active."""
+    events = sorted((point, delta) for segment in ref
+                    if segment["_end"] > segment["_start"]
+                    for point, delta in ((segment["_start"], 1), (segment["_end"], -1)))
+    active = 0
+    previous: float | None = None
+    overlap = 0.0
+    index = 0
+    while index < len(events):
+        point = events[index][0]
+        if previous is not None and active > 1:
+            overlap += point - previous
+        while index < len(events) and events[index][0] == point:
+            active += events[index][1]
+            index += 1
+        previous = point
+    return overlap
+
+
 def _maximum_overlap_mapping(refs: list[str], hyps: list[str],
                              overlap: dict[tuple[str, str], float]) -> dict[str, str]:
     """Maximum-weight one-to-one matching, allowing unmatched IDs on the larger side."""
@@ -124,9 +144,12 @@ def _maximum_overlap_mapping(refs: list[str], hyps: list[str],
 
 
 def _transcript_metrics(ref: list[dict[str, Any]], hyp: list[dict[str, Any]] | None) -> dict[str, Any]:
+    overlap_seconds = _reference_overlap_seconds(ref)
     if hyp is None:
-        return {"cer": {"value": None, "status": "not_evaluable_missing_output"},
-                "wer": {"value": None, "status": "not_evaluable_missing_output"}}
+        return {"cer": {"value": None, "status": "not_evaluable_missing_output",
+                         "overlap_seconds": overlap_seconds},
+                "wer": {"value": None, "status": "not_evaluable_missing_output",
+                        "overlap_seconds": overlap_seconds}}
     result = {}
     for lang, key in (("zh", "cer"), ("en", "wer")):
         refs = [s for s in ref if s.get("lang") == lang]
@@ -141,8 +164,14 @@ def _transcript_metrics(ref: list[dict[str, Any]], hyp: list[dict[str, Any]] | N
             if lang in labels:
                 htext.append(out["_text"])
         reference = _tokens("".join(s["_text"] for s in refs), lang)
+        if overlap_seconds > 0:
+            result[key] = {"value": None, "errors": None, "reference_units": len(reference),
+                           "overlap_seconds": overlap_seconds,
+                           "status": "not_evaluable_overlapping_reference"}
+            continue
         hypothesis = _tokens("".join(htext), lang)
         result[key] = _rate(_edit_distance(reference, hypothesis), len(reference))
+        result[key]["overlap_seconds"] = overlap_seconds
     return result
 
 
