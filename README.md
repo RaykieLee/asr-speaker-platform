@@ -70,7 +70,7 @@ Speaker enrollment uploads are limited to 64 MiB and 120 seconds by default. Ove
 
 ## 压测与容量
 
-压测工具支持实时、文件及混合负载，并输出会话、延迟、错误、进程 CPU 和内存 JSON/CSV 报告。输入必须为单声道 16 kHz PCM16 WAV。示例：
+压测工具支持实时、文件及混合负载，并输出会话、延迟、错误、进程树 CPU/内存/句柄与磁盘 I/O、宿主机磁盘/网络 JSON 报告和脱敏图表。宿主机指标包含同机其他进程，不代表服务端独占用量。输入必须为单声道 16 kHz PCM16 WAV。示例：
 
 ```bash
 python -m loadtest --base-url http://127.0.0.1:8000 \
