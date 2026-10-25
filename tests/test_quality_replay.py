@@ -68,7 +68,7 @@ def test_recognizer_uses_platform_modeling_unit_and_vocab(tmp_path, monkeypatch)
     monkeypatch.setattr(SherpaOfflineRecognizer, "load", classmethod(fake_load))
     replay._load_recognizer(model_dir, "offline-v1", artifacts)
     assert captured == {"modeling_unit": "cjkchar+bpe", "decoding_method": "modified_beam_search",
-                        "num_threads": 2, "bpe_vocab": vocab}
+                        "num_threads": 2, "provider": "cpu", "bpe_vocab": vocab}
 
 
 def test_registration_wal_is_rejected_even_when_empty(tmp_path):
@@ -128,11 +128,30 @@ def test_runtime_provenance_and_fixed_inference_parameters():
     assert runtime["python_version"]
     assert "sherpa_onnx_version" in runtime
     assert "git_commit" in runtime
+    assert isinstance(runtime["git_dirty"], bool)
+    assert isinstance(runtime["git_status_available"], bool)
     assert replay.INFERENCE_CONFIG == {
-        "asr": {"modeling_unit": "cjkchar+bpe", "decoding_method": "modified_beam_search", "num_threads": 2},
+        "asr": {"modeling_unit": "cjkchar+bpe", "decoding_method": "modified_beam_search",
+                "num_threads": 2, "provider": "cpu"},
+        "file_asr": {"max_chunk_seconds": 60.0, "overlap_seconds": 0.8},
         "diarization": {"num_threads": 2, "provider": "cpu", "min_duration_on": 0.3, "min_duration_off": 0.5},
         "speaker_embedding": {"num_threads": 1, "provider": "cpu"},
         "speaker_matching": {"min_similarity": 0.55, "min_margin": 0.05,
                              "min_segment_seconds": 1.0, "max_segments_per_speaker": 5,
                              "min_segments_per_speaker": 2},
     }
+
+
+def test_file_asr_chunk_parameters_are_passed_to_service(monkeypatch):
+    from backend.app.pipelines import file_asr
+
+    captured = {}
+
+    class FakeFileASRService:
+        def __init__(self, recognizer, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(file_asr, "FileASRService", FakeFileASRService)
+    replay._create_file_asr("recognizer", "diarizer", "matcher")
+    assert captured == {"diarizer": "diarizer", "speaker_matcher": "matcher",
+                        "max_chunk_seconds": 60.0, "overlap_seconds": 0.8}

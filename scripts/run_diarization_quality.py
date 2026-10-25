@@ -22,7 +22,9 @@ class ReplayError(Exception):
 
 
 INFERENCE_CONFIG = {
-    "asr": {"modeling_unit": "cjkchar+bpe", "decoding_method": "modified_beam_search", "num_threads": 2},
+    "asr": {"modeling_unit": "cjkchar+bpe", "decoding_method": "modified_beam_search",
+            "num_threads": 2, "provider": "cpu"},
+    "file_asr": {"max_chunk_seconds": 60.0, "overlap_seconds": 0.8},
     "diarization": {"num_threads": 2, "provider": "cpu", "min_duration_on": 0.3, "min_duration_off": 0.5},
     "speaker_embedding": {"num_threads": 1, "provider": "cpu"},
     "speaker_matching": {"min_similarity": 0.55, "min_margin": 0.05,
@@ -66,8 +68,19 @@ def _runtime_provenance() -> dict[str, Any]:
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         commit = None
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=repo_root, check=True,
+            capture_output=True, text=True,
+        ).stdout
+        git_status_available = True
+        git_dirty = bool(status)
+    except (OSError, subprocess.CalledProcessError):
+        git_status_available = False
+        git_dirty = True  # Fail conservatively: an unavailable status is not evidence of a clean tree.
     return {"python_version": platform.python_version(), "sherpa_onnx_version": sherpa_version,
-            "git_commit": commit}
+            "git_commit": commit, "git_dirty": git_dirty,
+            "git_status_available": git_status_available}
 
 
 def sha256(path: Path) -> str:
@@ -147,13 +160,17 @@ def _load_recognizer(model_dir: Path, asr_version: str,
     files = OfflineTransducerFiles(encoder, decoder, joiner, tokens)
     artifact = ModelArtifact(model_dir.name, "transducer", asr_version,
                              (encoder, decoder, joiner, tokens))
-    return SherpaOfflineRecognizer.load(
-        artifact, files, **INFERENCE_CONFIG["asr"], bpe_vocab=vocab,
-    )
+    return SherpaOfflineRecognizer.load(artifact, files, **INFERENCE_CONFIG["asr"], bpe_vocab=vocab)
+
+
+def _create_file_asr(recognizer: Any, diarizer: Any, matcher: Any) -> Any:
+    from backend.app.pipelines.file_asr import FileASRService
+
+    return FileASRService(recognizer, diarizer=diarizer, speaker_matcher=matcher,
+                          **INFERENCE_CONFIG["file_asr"])
 
 
 def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    from backend.app.pipelines.file_asr import FileASRService
     from backend.app.speakers.diarization import SherpaOfflineDiarizer
     from backend.app.speakers.matching import SpeakerMatcher
     from backend.app.speakers.service import SherpaSpeakerEmbeddingAdapter, SpeakerModel
@@ -190,7 +207,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[
     profiles = ReadOnlyProfiles(database)
     try:
         matcher = SpeakerMatcher(profiles, extractor, **INFERENCE_CONFIG["speaker_matching"])
-        result = FileASRService(recognizer, diarizer=diarizer, speaker_matcher=matcher).transcribe_file(audio)
+        result = _create_file_asr(recognizer, diarizer, matcher).transcribe_file(audio)
     finally:
         profiles.close()
     _reject_wal(database)
