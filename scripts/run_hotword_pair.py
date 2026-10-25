@@ -29,7 +29,7 @@ from scripts.compare_public_outputs import edit_distance, normalize_zh
 DEFAULT_MODEL_DIR = ROOT / "models" / "offline-multi"
 DEFAULT_MODEL_VERSION = "zipformer-multi-zh-hans-2023-9-2"
 MODEL_FILES = ("encoder-epoch-20-avg-1.int8.onnx", "decoder-epoch-20-avg-1.int8.onnx",
-               "joiner-epoch-20-avg-1.int8.onnx", "tokens.txt", "bpe.model")
+               "joiner-epoch-20-avg-1.int8.onnx", "tokens.txt", "bpe.model", "bpe.vocab")
 
 
 def sha256_file(path: Path) -> str:
@@ -133,7 +133,7 @@ def _new_recognizer(model_dir: Path, *, threads: int, provider: str) -> Any:
         joiner=str(model_dir / MODEL_FILES[2]), tokens=str(model_dir / "tokens.txt"),
         num_threads=threads, sample_rate=16_000, feature_dim=80,
         decoding_method="modified_beam_search", provider=provider,
-        hotwords_score=1.0, modeling_unit="cjkchar+bpe", bpe_vocab=str(model_dir / "bpe.model"),
+        hotwords_score=1.0, modeling_unit="cjkchar+bpe", bpe_vocab=str(model_dir / "bpe.vocab"),
     )
 
 

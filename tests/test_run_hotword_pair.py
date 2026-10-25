@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.run_hotword_pair import _format_hotwords, parse_hotword, run_pair, score_hypothesis
+from scripts.run_hotword_pair import _format_hotwords, _new_recognizer, parse_hotword, run_pair, score_hypothesis
 
 
 def test_parse_hotword_requires_finite_positive_trailing_score():
@@ -23,6 +23,22 @@ def test_hotword_encoding_keeps_score_as_final_separate_item():
         {"tokens": ["▁SALE", "S"], "score": 2.5},
     ])
     assert encoded == ["商 场 :1", "▁SALE S :2.5"]
+
+
+def test_recognizer_uses_generated_text_bpe_vocabulary(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    captured = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    fake_sherpa = SimpleNamespace(OfflineRecognizer=SimpleNamespace(from_transducer=factory))
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", fake_sherpa)
+    _new_recognizer(tmp_path, threads=3, provider="cpu")
+    assert captured["bpe_vocab"] == str(tmp_path / "bpe.vocab")
 
 
 def test_model_level_metrics_count_cer_and_present_or_absent_targets():
@@ -56,7 +72,7 @@ def test_run_pair_reuses_identical_samples_writes_raw_and_hashed_manifest(tmp_pa
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     for name in ("encoder-epoch-20-avg-1.int8.onnx", "decoder-epoch-20-avg-1.int8.onnx",
-                 "joiner-epoch-20-avg-1.int8.onnx", "tokens.txt", "bpe.model"):
+                 "joiner-epoch-20-avg-1.int8.onnx", "tokens.txt", "bpe.model", "bpe.vocab"):
         (model_dir / name).write_bytes(name.encode())
     monkeypatch.setattr("scripts.run_hotword_pair._compile_hotwords",
                         lambda _dir, _args: ([{"phrase": "商场", "tokens": ["商", "场"], "score": 1.0},
@@ -93,6 +109,7 @@ def test_run_pair_reuses_identical_samples_writes_raw_and_hashed_manifest(tmp_pa
         "mode": "disabled", "text": "商场客流量"}
     assert result["inputs"]["wav_sha256"]
     assert result["model"]["files_sha256"]["tokens.txt"]
+    assert result["model"]["files_sha256"]["bpe.vocab"]
     saved_manifest = json.loads((out / "manifest.json").read_text())
     assert "text" not in saved_manifest["results"]["enabled"]
     with pytest.raises(FileExistsError):
