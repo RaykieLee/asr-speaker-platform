@@ -41,6 +41,28 @@ def edit_distance(reference: str, hypothesis: str) -> int:
     return prev[-1]
 
 
+def _reference_overlap(segments: list[dict[str, Any]]) -> dict[str, float]:
+    intervals = []
+    for segment in segments:
+        start = float(segment.get("start", segment.get("start_seconds", 0)))
+        end = float(segment.get("end", segment.get("end_seconds", 0)))
+        if end > start:
+            intervals.append((start, end))
+    points = sorted({point for interval in intervals for point in interval})
+    single = overlap = 0.0
+    for left, right in zip(points, points[1:]):
+        mid = (left + right) / 2
+        active = sum(start <= mid < end for start, end in intervals)
+        if active == 1:
+            single += right - left
+        elif active > 1:
+            overlap += right - left
+    covered = single + overlap
+    return {"nonoverlap_reference_seconds": single, "overlap_reference_seconds": overlap,
+            "reference_speech_seconds": covered,
+            "nonoverlap_reference_coverage": single / covered if covered else 0.0}
+
+
 def _transcript(data: dict[str, Any], key: str = "text") -> str:
     segments = data["segments"]
     if any(not isinstance(seg, dict) or not isinstance(seg.get(key, ""), str) for seg in segments):
@@ -71,10 +93,19 @@ def _hotwords(annotation: dict[str, Any], output: dict[str, Any]) -> dict[str, A
 
 def compare(annotation: dict[str, Any], outputs: dict[str, dict[str, Any]]) -> dict[str, Any]:
     reference = _transcript(annotation)
+    reference_coverage = _reference_overlap(annotation["segments"])
+    has_overlap = reference_coverage["overlap_reference_seconds"] > 0
     result: dict[str, Any] = {"schema_version": 1, "cer_normalization":
                               "global concatenation ordered by start; remove whitespace, punctuation and <sil>/<#>; CER uses Unicode characters",
-                              "reference_characters": len(reference), "platforms": {}}
+                              "reference_characters": len(reference),
+                              "reference_overlap": reference_coverage,
+                              "platforms": {}}
     for name, output in outputs.items():
+        hotword_set_id = output.get("hotword_set_id")
+        if name == "enabled" and (not isinstance(hotword_set_id, str) or not hotword_set_id.strip()):
+            raise ValueError("enabled output must contain a non-empty hotword_set_id")
+        if name == "disabled" and ("hotword_set_id" not in output or hotword_set_id is not None):
+            raise ValueError("disabled output must contain hotword_set_id: null")
         hypothesis = _transcript(output)
         edits = edit_distance(reference, hypothesis)
         try:
@@ -82,12 +113,15 @@ def compare(annotation: dict[str, Any], outputs: dict[str, dict[str, Any]]) -> d
         except EvaluationError as exc:
             raise ValueError(f"{name} output is incompatible with evaluation.quality: {exc}") from exc
         result["platforms"][name] = {
-            "cer": {"value": edits / len(reference) if reference else None, "errors": edits,
+            "cer": {"value": edits / len(reference) if reference and not has_overlap else None,
+                    "errors": edits if not has_overlap else None,
                     "reference_characters": len(reference),
-                    "status": "evaluated" if reference else "not_evaluable_empty_reference"},
+                    "status": ("not_evaluable_overlapping_reference" if has_overlap else
+                               "evaluated" if reference else "not_evaluable_empty_reference")},
             "speaker_metrics": {key: quality[key] for key in (
                 "der_like", "registered_hit_rate", "unknown_false_attribution_rate", "boundary_error_seconds")},
-            "hotwords": _hotwords(annotation, output),
+            "hotwords": {**_hotwords(annotation, output), "mode": name,
+                         "hotword_set_id": hotword_set_id},
         }
     return result
 

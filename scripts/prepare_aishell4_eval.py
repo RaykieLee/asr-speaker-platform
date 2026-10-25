@@ -64,7 +64,7 @@ def _read_intervals(path: Path) -> list[tuple[str, float, float, str]]:
 
 
 def prepare(audio: Path, textgrid_path: Path, start: float, end: float, wav_path: Path,
-            annotation_path: Path, hotwords: list[str]) -> dict[str, Any]:
+            annotation_path: Path, hotwords: list[str], channel: int | str = 0) -> dict[str, Any]:
     try:
         import numpy as np
         import soundfile as sf
@@ -82,7 +82,12 @@ def prepare(audio: Path, textgrid_path: Path, start: float, end: float, wav_path
         data = source.read(frames, dtype="float64", always_2d=True)
     if not len(data):
         raise ValueError("selected audio interval is empty")
-    mono = data.mean(axis=1)
+    if channel == "mixdown":
+        mono = data.mean(axis=1)
+    elif isinstance(channel, int) and 0 <= channel < info.channels:
+        mono = data[:, channel]
+    else:
+        raise ValueError(f"channel must be an index from 0 to {info.channels - 1}, or 'mixdown'")
     pcm = _resample_sinc(mono, info.samplerate)
     wav_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(wav_path), np.clip(pcm, -1, 1), 16000, subtype="PCM_16", format="WAV")
@@ -101,12 +106,13 @@ def prepare(audio: Path, textgrid_path: Path, start: float, end: float, wav_path
     annotation = {"segments": segments, "hotword_targets": hotwords,
                   "source": {"dataset": "AISHELL-4", "audio_file": audio.name,
                              "textgrid_file": textgrid_path.name,
-                             "source_start_seconds": start, "source_end_seconds": end}}
+                             "source_start_seconds": start, "source_end_seconds": end,
+                             "source_channel": channel}}
     annotation_path.parent.mkdir(parents=True, exist_ok=True)
     annotation_path.write_text(json.dumps(annotation, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"wav": str(wav_path), "annotation": str(annotation_path), "segments": len(segments),
             "duration_seconds": len(pcm) / 16000, "sample_rate": 16000, "channels": 1,
-            "subtype": "PCM_16"}
+            "subtype": "PCM_16", "source_channel": channel}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,10 +124,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wav", required=True, type=Path)
     parser.add_argument("--annotation", required=True, type=Path)
     parser.add_argument("--hotwords", default="", help="comma-separated terms, manually chosen for the test")
+    parser.add_argument("--channel", default="0",
+                        help="source channel index (default: 0), or 'mixdown' to average all channels")
     args = parser.parse_args(argv)
     try:
+        channel: int | str = "mixdown" if args.channel == "mixdown" else int(args.channel)
         result = prepare(args.audio, args.textgrid, args.start, args.end, args.wav,
-                         args.annotation, [clean_text(x) for x in args.hotwords.split(",") if clean_text(x)])
+                         args.annotation, [clean_text(x) for x in args.hotwords.split(",") if clean_text(x)], channel)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"prepare error: {exc}", file=sys.stderr)
         return 2
