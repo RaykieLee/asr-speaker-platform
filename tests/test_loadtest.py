@@ -197,6 +197,54 @@ def test_resource_sampler_collects_disk_handles_and_host_network_with_explicit_s
     assert later["network_bytes_sent_per_second"] > 0
 
 
+def test_host_disk_io_fills_mac_gap_without_misattributing_to_process_tree(monkeypatch):
+    class FakeProcess:
+        pid = 51
+        def children(self, recursive=False): return []
+        def create_time(self): return 1.0
+        def cpu_times(self): return SimpleNamespace(user=0.1, system=0.0)
+        def memory_info(self): return SimpleNamespace(rss=100)
+        def memory_full_info(self): return SimpleNamespace(pss=80)
+        def num_threads(self): return 1
+        def num_fds(self): return 5
+
+    process = FakeProcess()
+    disk = {"read": 0, "write": 0}
+    class NoSuchProcess(Exception): pass
+    class AccessDenied(Exception): pass
+    def host_disk_counters():
+        disk["read"] += 4096
+        disk["write"] += 2048
+        return SimpleNamespace(read_bytes=disk["read"], write_bytes=disk["write"])
+    fake_psutil = SimpleNamespace(
+        Process=lambda _pid: process,
+        NoSuchProcess=NoSuchProcess, AccessDenied=AccessDenied,
+        disk_io_counters=host_disk_counters,
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    async def collect():
+        sampler = ResourceSampler(0.005, process_targets=[("api", 51)])
+        sampler.current_concurrency_tier = 2
+        await sampler.start()
+        await asyncio.sleep(0.02)
+        await sampler.stop()
+        return sampler.samples
+
+    samples = asyncio.run(collect())
+    assert len(samples) >= 2
+    first, later = samples[0], samples[1]
+    assert first["disk_process_scope"] == "process_tree"
+    assert first["disk_read_bytes"] is None
+    assert first["disk_write_bytes"] is None
+    assert first["disk_read_bytes_unavailable_reason"] == "process_metric_unavailable"
+    assert first["disk_host_scope"] == "host"
+    assert first["disk_host_read_bytes"] == 4096
+    assert later["concurrency_tier"] == 2
+    assert later["disk_host_read_bytes_per_second"] > 0
+    assert later["disk_host_write_bytes_per_second"] > 0
+
+
 def test_resource_charts_show_new_metrics_and_legacy_reports_as_unavailable():
     legacy = render_html({"config": {}, "sessions": [], "resource_samples": []})
     assert "磁盘读取速率" in legacy and "不可评估：没有可用采样数据" in legacy
@@ -204,10 +252,13 @@ def test_resource_charts_show_new_metrics_and_legacy_reports_as_unavailable():
         "sampled_at": "2026-10-25T10:00:00+00:00", "scope": "process_tree_total",
         "concurrency_tier": 4,
         "disk_read_bytes_per_second": 1024, "disk_write_bytes_per_second": 2048,
+        "disk_host_scope": "host", "disk_host_read_bytes_per_second": 3072,
+        "disk_host_write_bytes_per_second": 4096,
         "file_handles": 9, "network_scope": "host", "network_bytes_received_per_second": 300,
         "network_bytes_sent_per_second": 400,
     }]})
-    for label in ("磁盘写入速率", "文件句柄数", "网络接收速率（宿主机）", "网络发送速率（宿主机）"):
+    for label in ("进程树磁盘写入速率", "宿主机磁盘读取速率", "宿主机磁盘写入速率",
+                  "文件句柄数", "网络接收速率（宿主机）", "网络发送速率（宿主机）"):
         assert label in report
     assert "宿主机级" in report
     assert "4 路" in report and "P50 0.000 / P95 0.000" in report

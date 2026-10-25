@@ -266,6 +266,7 @@ class ResourceSampler:
         # (process creation time, cumulative user+system CPU seconds, wall time)
         self._cpu_baselines: dict[int, tuple[float, float, float]] = {}
         self._io_baselines: dict[int, tuple[float, int, int, float]] = {}
+        self._host_disk_baseline: tuple[int, int, float] | None = None
         self._network_baseline: tuple[int, int, float] | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -403,6 +404,7 @@ class ResourceSampler:
                     sample = {
                         "sampled_at": sampled_at, "scope": "process_tree_total",
                         "concurrency_tier": self.current_concurrency_tier,
+                        "disk_process_scope": "process_tree",
                         "cpu_percent": (sum(row["cpu_percent"] for row in process_rows)
                                         if cpu_total_available else None),
                         "rss_bytes": sum(row["rss_bytes"] for row in process_rows) if totals_available else None,
@@ -436,7 +438,8 @@ class ResourceSampler:
                 else:
                     row = process_rows[0] if process_rows else {}
                     sample = {"sampled_at": sampled_at, "scope": "loadtest_client_process",
-                              "concurrency_tier": self.current_concurrency_tier, **row}
+                              "concurrency_tier": self.current_concurrency_tier,
+                              "disk_process_scope": "loadtest_client_process", **row}
                     for key in ("disk_read_bytes", "disk_write_bytes", "disk_read_bytes_per_second",
                                 "disk_write_bytes_per_second", "file_handles"):
                         if key not in sample:
@@ -444,6 +447,33 @@ class ResourceSampler:
                             sample[f"{key}_unavailable_reason"] = "process_metric_unavailable"
                     sample["system_cpu_percent"] = psutil.cpu_percent(interval=None)
                     sample["system_memory_percent"] = psutil.virtual_memory().percent
+                try:
+                    disk = psutil.disk_io_counters()
+                    if disk is None:
+                        raise OSError("host_disk_counters_unavailable")
+                    read_bytes, write_bytes = int(disk.read_bytes), int(disk.write_bytes)
+                    prior_disk = self._host_disk_baseline
+                    sample.update({"disk_host_scope": "host", "disk_host_read_bytes": read_bytes,
+                                   "disk_host_write_bytes": write_bytes})
+                    if prior_disk is not None and sample_monotonic > prior_disk[2] and read_bytes >= prior_disk[0] and write_bytes >= prior_disk[1]:
+                        elapsed = sample_monotonic - prior_disk[2]
+                        sample["disk_host_read_bytes_per_second"] = (read_bytes - prior_disk[0]) / elapsed
+                        sample["disk_host_write_bytes_per_second"] = (write_bytes - prior_disk[1]) / elapsed
+                    else:
+                        sample["disk_host_read_bytes_per_second"] = None
+                        sample["disk_host_write_bytes_per_second"] = None
+                        sample["disk_host_read_rate_unavailable_reason"] = (
+                            "baseline_unavailable" if prior_disk is None else "counter_reset")
+                        sample["disk_host_write_rate_unavailable_reason"] = (
+                            "baseline_unavailable" if prior_disk is None else "counter_reset")
+                    self._host_disk_baseline = (read_bytes, write_bytes, sample_monotonic)
+                except (AttributeError, OSError, psutil.AccessDenied, TypeError, ValueError) as exc:
+                    sample.update({"disk_host_scope": "host", "disk_host_read_bytes": None,
+                                   "disk_host_write_bytes": None,
+                                   "disk_host_read_bytes_per_second": None,
+                                   "disk_host_write_bytes_per_second": None,
+                                   "disk_host_read_unavailable_reason": type(exc).__name__,
+                                   "disk_host_write_unavailable_reason": type(exc).__name__})
                 try:
                     network = psutil.net_io_counters()
                     if network is None:
