@@ -39,7 +39,7 @@ python -m loadtest --wav samples/authorized-mono-16k.wav \
 
 持续模式需要经授权且适合长时间循环的音频；应在报告中记录循环方式。`config` 会写入 `tier_duration_seconds`、`max_file_jobs_per_tier`、`file_jobs_by_concurrency_tier` 和 `start_stagger_ms`。文件任务在 `POST /api/v1/transcriptions` 创建，然后轮询 `GET /api/v1/transcriptions/{job_id}`。实时模式连接 `/api/v1/stream`，发 `start` JSON、按真实时间节奏发送 PCM 二进制帧，再发 `stop`。
 
-鉴权可使用 `--token`，更推荐 `ASR_API_TOKEN` 环境变量。服务端进程资源采集需要本机可访问对应 PID。重复传入 `--resource-process ROLE=PID` 可覆盖 API、外置 Worker 等多个进程根；每个根的后代进程也会采样，PID 重叠时每个进程只计一次。每个采样点同时记录总 CPU/RSS/PSS 和按角色标记的进程明细，配置中列出采样根及资源范围。旧参数 `--server-pid PID` 保留，等价于 API 进程根并包含其后代。不传 PID 时 psutil 若可用则采集压测客户端进程及系统 CPU/内存，并在报告中标出作用范围。未安装 psutil 时跳过资源采样；它不会作为强制依赖装入后端。
+鉴权可使用 `--token`，更推荐 `ASR_API_TOKEN` 环境变量。服务端进程资源采集需要本机可访问对应 PID。重复传入 `--resource-process ROLE=PID` 可覆盖 API、外置 Worker 等多个进程根；每个根的后代进程也会采样，PID 重叠时每个进程只计一次。每个采样点同时记录进程树总 CPU/RSS/PSS、磁盘读写累计字节数及相邻采样速率、文件句柄数和按角色标记的进程明细，并带有 `concurrency_tier` 档位标签。旧参数 `--server-pid PID` 保留，等价于 API 进程根并包含其后代。不传 PID 时 psutil 若可用则采集压测客户端进程及系统 CPU/内存。网络读写累计值和速率来自 psutil 宿主机接口计数器，明确标为 `network_scope=host`，包含压测客户端与同机其他进程的网络流量，不能解释为服务端进程网络数据。每种资源字段在不可用时保留 `null`，并提供不可用原因；速率的第一个采样点因尚无基线为 `null`。未安装 psutil 时跳过资源采样；它不会作为强制依赖装入后端。
 
 ## 输出和指标
 
@@ -53,7 +53,7 @@ python -m loadtest.plot results/2026-10-23-realtime/report.json
 python -m loadtest.plot results/2026-10-23-realtime/report.json --output results/summary.html
 ```
 
-默认在 JSON 旁生成 `report.html`。图表包含 CPU/RSS 随采样时间的曲线、按并发档位和负载模式计算的成功率、关键时延 P50/P95 表及 P95 图。缺少资源样本或某项时延时标为“不可评估”，不补零。HTML 不包含会话原始转写文本。
+默认在 JSON 旁生成 `report.html`。图表包含按并发档位汇总的磁盘读写速率、文件句柄数、宿主机网络读写速率 P50/P95，以及 CPU、RSS 和上述资源随采样时间的曲线、按并发档位和负载模式计算的成功率、关键时延 P50/P95 表及 P95 图。旧报告没有档位标签时显示无法按档汇总；没有新增资源字段时对应指标显示“不可评估”。缺少资源样本或某项时延时不补零。HTML 不包含会话原始转写文本。
 
 服务端没有报告 `dropped_frames` 时，`server_dropped_frames` 保持 `null`，不按零处理。客户端 `client_late_frames` 仅表示发送端落后于音频时间线，不能代替服务端丢帧计数。没有收到 partial/speaker 时延值时，分位数按可观测样本计算；不可观测延迟不会伪造为零。分位数采用线性插值定义。`gates` 给出已设置门槛的 pass/fail/not_evaluable 状态；任何关键指标未知都会使整体状态至少为 not_evaluable。
 

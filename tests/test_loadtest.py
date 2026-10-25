@@ -10,6 +10,7 @@ from loadtest.core import (ResourceSampler, SessionResult, aggregate_final_speak
                            pace_pcm, percentile, summarize, write_report)
 from loadtest.runner import (_run_continuous_file_tier, build_parser, load_wav, run,
                             run_file_job, run_live_session, write_repeated_wav)
+from loadtest.plot import render_html
 
 
 def test_percentile_uses_linear_interpolation_and_empty_values():
@@ -46,6 +47,7 @@ def test_resource_sampler_aggregates_configured_process_trees_without_double_cou
 
     async def collect_one():
         sampler = ResourceSampler(0.01, process_targets=[("api", 10), ("worker", 20)])
+        sampler.current_concurrency_tier = 4
         await sampler.start()
         await asyncio.sleep(0.035)
         await sampler.stop()
@@ -55,9 +57,12 @@ def test_resource_sampler_aggregates_configured_process_trees_without_double_cou
     assert len(samples) >= 2
     sample = samples[0]
     assert sample["scope"] == "process_tree_total"
+    assert sample["concurrency_tier"] == 4
     assert sample["cpu_percent"] is None  # first sample establishes each PID's baseline
     assert sample["rss_bytes"] == 6000
     assert sample["pss_bytes"] == 3000
+    assert sample["disk_read_bytes"] is None
+    assert sample["disk_read_bytes_unavailable_reason"] == "process_metric_unavailable"
     assert {row["pid"] for row in sample["processes"]} == {10, 20, 30}
     assert len(sample["processes"]) == 3
     role_by_pid = {row["pid"]: row["role"] for row in sample["processes"]}
@@ -138,6 +143,74 @@ def test_resource_sampler_resets_cpu_baseline_for_process_exit_and_reappearance(
     reappeared = [row for sample in samples[absent_index:] for row in sample["processes"]
                   if row["pid"] == 22]
     assert reappeared and reappeared[0]["cpu_percent"] is None
+
+
+def test_resource_sampler_collects_disk_handles_and_host_network_with_explicit_scope(monkeypatch):
+    class FakeProcess:
+        pid = 41
+        reads = writes = 0
+        def children(self, recursive=False): return []
+        def create_time(self): return 1.0
+        def cpu_times(self): return SimpleNamespace(user=0.1, system=0.0)
+        def memory_info(self): return SimpleNamespace(rss=100)
+        def memory_full_info(self): return SimpleNamespace(pss=80)
+        def num_threads(self): return 1
+        def io_counters(self):
+            self.reads += 100
+            self.writes += 50
+            return SimpleNamespace(read_bytes=self.reads, write_bytes=self.writes)
+        def num_fds(self): return 7
+
+    process = FakeProcess()
+    net = {"sent": 0, "recv": 0}
+    fake_psutil = SimpleNamespace(
+        Process=lambda _pid: process,
+        NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+        AccessDenied=type("AccessDenied", (Exception,), {}),
+        net_io_counters=lambda: SimpleNamespace(bytes_sent=(net.__setitem__("sent", net["sent"] + 100) or net["sent"]),
+                                                bytes_recv=(net.__setitem__("recv", net["recv"] + 200) or net["recv"])),
+        cpu_percent=lambda interval=None: 0.0,
+        virtual_memory=lambda: SimpleNamespace(percent=1.0),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    async def collect():
+        sampler = ResourceSampler(0.005, process_targets=[("api", 41)])
+        await sampler.start()
+        await asyncio.sleep(0.02)
+        await sampler.stop()
+        return sampler.samples
+
+    samples = asyncio.run(collect())
+    assert len(samples) >= 2
+    assert samples[0]["scope"] == "process_tree_total"
+    assert samples[0]["disk_read_bytes"] == 100
+    assert samples[0]["file_handles"] == 7
+    assert samples[0]["disk_read_bytes_per_second"] is None
+    later = samples[1]
+    assert later["disk_read_bytes"] >= 200
+    assert later["disk_read_bytes_per_second"] > 0
+    assert later["disk_write_bytes_per_second"] > 0
+    assert later["file_handles"] == 7
+    assert later["network_scope"] == "host"
+    assert later["network_bytes_received_per_second"] > 0
+    assert later["network_bytes_sent_per_second"] > 0
+
+
+def test_resource_charts_show_new_metrics_and_legacy_reports_as_unavailable():
+    legacy = render_html({"config": {}, "sessions": [], "resource_samples": []})
+    assert "磁盘读取速率" in legacy and "不可评估：没有可用采样数据" in legacy
+    report = render_html({"config": {}, "sessions": [], "resource_samples": [{
+        "sampled_at": "2026-10-25T10:00:00+00:00", "scope": "process_tree_total",
+        "concurrency_tier": 4,
+        "disk_read_bytes_per_second": 1024, "disk_write_bytes_per_second": 2048,
+        "file_handles": 9, "network_scope": "host", "network_bytes_received_per_second": 300,
+        "network_bytes_sent_per_second": 400,
+    }]})
+    for label in ("磁盘写入速率", "文件句柄数", "网络接收速率（宿主机）", "网络发送速率（宿主机）"):
+        assert label in report
+    assert "宿主机级" in report
+    assert "4 路" in report and "P50 0.000 / P95 0.000" in report
 
 
 def test_final_speaker_events_deduplicate_by_segment_and_revision_without_exposing_payload():

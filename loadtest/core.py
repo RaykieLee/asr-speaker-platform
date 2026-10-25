@@ -259,11 +259,14 @@ class ResourceSampler:
         self.interval_seconds = interval_seconds
         self.pid = pid
         self.process_targets = list(process_targets or [])
+        self.current_concurrency_tier: int | None = None
         if pid is not None and not self.process_targets:
             self.process_targets = [("api", pid)]
         self.samples: list[dict[str, Any]] = []
         # (process creation time, cumulative user+system CPU seconds, wall time)
         self._cpu_baselines: dict[int, tuple[float, float, float]] = {}
+        self._io_baselines: dict[int, tuple[float, int, int, float]] = {}
+        self._network_baseline: tuple[int, int, float] | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         try:
@@ -293,6 +296,7 @@ class ResourceSampler:
                 process_candidates: dict[int, tuple[int, int, str, Any]] = {}
                 target_errors: list[dict[str, Any]] = []
                 cpu_errors: list[dict[str, Any]] = []
+                io_errors: list[dict[str, Any]] = []
                 for root_index, (role, root_pid) in enumerate(targets):
                     try:
                         root = psutil.Process(root_pid)
@@ -317,6 +321,7 @@ class ResourceSampler:
                         target_errors.append({"role": role, "pid": root_pid, "error": type(exc).__name__})
                 process_rows: list[dict[str, Any]] = []
                 next_cpu_baselines: dict[int, tuple[float, float, float]] = {}
+                next_io_baselines: dict[int, tuple[float, int, int, float]] = {}
                 for process_pid, (_distance, _root_index, role, process) in sorted(process_candidates.items()):
                     try:
                         memory = process.memory_info()
@@ -341,6 +346,49 @@ class ResourceSampler:
                             "cpu_percent": cpu_percent, "rss_bytes": memory.rss,
                             "threads": process.num_threads(),
                         }
+                        io_stats = None
+                        try:
+                            identity = float(process.create_time())
+                            io_stats = process.io_counters()
+                            read_bytes, write_bytes = int(io_stats.read_bytes), int(io_stats.write_bytes)
+                            previous_io = self._io_baselines.get(process_pid)
+                            read_rate = write_rate = None
+                            read_rate_reason = write_rate_reason = "baseline_unavailable"
+                            if (previous_io is not None and previous_io[0] == identity
+                                    and sample_monotonic > previous_io[3]):
+                                elapsed = sample_monotonic - previous_io[3]
+                                if read_bytes >= previous_io[1]:
+                                    read_rate = (read_bytes - previous_io[1]) / elapsed
+                                    read_rate_reason = None
+                                else:
+                                    read_rate_reason = "counter_reset"
+                                if write_bytes >= previous_io[2]:
+                                    write_rate = (write_bytes - previous_io[2]) / elapsed
+                                    write_rate_reason = None
+                                else:
+                                    write_rate_reason = "counter_reset"
+                            next_io_baselines[process_pid] = (identity, read_bytes, write_bytes, sample_monotonic)
+                            row.update({"disk_read_bytes": read_bytes, "disk_write_bytes": write_bytes,
+                                        "disk_read_bytes_per_second": read_rate,
+                                        "disk_write_bytes_per_second": write_rate,
+                                        "disk_read_rate_unavailable_reason": read_rate_reason,
+                                        "disk_write_rate_unavailable_reason": write_rate_reason})
+                        except (AttributeError, psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
+                            io_errors.append({"pid": process_pid, "metric": "disk_io", "error": type(exc).__name__})
+                            row.update({"disk_read_bytes": None, "disk_write_bytes": None,
+                                        "disk_read_bytes_per_second": None, "disk_write_bytes_per_second": None,
+                                        "disk_io_unavailable_reason": type(exc).__name__})
+                        try:
+                            if hasattr(process, "num_fds"):
+                                row["file_handles"] = int(process.num_fds())
+                            elif hasattr(process, "num_handles"):
+                                row["file_handles"] = int(process.num_handles())
+                            else:
+                                row["file_handles"] = None
+                                row["file_handles_unavailable_reason"] = "unsupported_platform"
+                        except (AttributeError, psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
+                            row["file_handles"] = None
+                            row["file_handles_unavailable_reason"] = type(exc).__name__
                         try:
                             row["pss_bytes"] = process.memory_full_info().pss
                         except (AttributeError, psutil.AccessDenied, OSError):
@@ -354,6 +402,7 @@ class ResourceSampler:
                                                                    for row in process_rows)
                     sample = {
                         "sampled_at": sampled_at, "scope": "process_tree_total",
+                        "concurrency_tier": self.current_concurrency_tier,
                         "cpu_percent": (sum(row["cpu_percent"] for row in process_rows)
                                         if cpu_total_available else None),
                         "rss_bytes": sum(row["rss_bytes"] for row in process_rows) if totals_available else None,
@@ -361,17 +410,65 @@ class ResourceSampler:
                         "pss_bytes": (sum(row["pss_bytes"] for row in process_rows)
                                       if totals_available and all(row["pss_bytes"] is not None for row in process_rows)
                                       else None),
+                        "disk_read_bytes": (sum(row["disk_read_bytes"] for row in process_rows)
+                                            if totals_available and all(row.get("disk_read_bytes") is not None for row in process_rows) else None),
+                        "disk_write_bytes": (sum(row["disk_write_bytes"] for row in process_rows)
+                                             if totals_available and all(row.get("disk_write_bytes") is not None for row in process_rows) else None),
+                        "disk_read_bytes_per_second": (sum(row["disk_read_bytes_per_second"] for row in process_rows)
+                                                       if totals_available and all(row.get("disk_read_bytes_per_second") is not None for row in process_rows) else None),
+                        "disk_write_bytes_per_second": (sum(row["disk_write_bytes_per_second"] for row in process_rows)
+                                                        if totals_available and all(row.get("disk_write_bytes_per_second") is not None for row in process_rows) else None),
+                        "file_handles": (sum(row["file_handles"] for row in process_rows)
+                                         if totals_available and all(row.get("file_handles") is not None for row in process_rows) else None),
                         "processes": process_rows,
                         "target_errors": target_errors,
                         "cpu_errors": cpu_errors,
+                        "io_errors": io_errors,
                     }
+                    for key in ("disk_read_bytes", "disk_write_bytes", "disk_read_bytes_per_second",
+                                "disk_write_bytes_per_second", "file_handles"):
+                        if sample[key] is None:
+                            sample[f"{key}_unavailable_reason"] = (
+                                "process_unavailable" if target_errors else
+                                "process_metric_unavailable" if io_errors or any(row.get("file_handles") is None for row in process_rows)
+                                else "baseline_unavailable"
+                            )
                 else:
                     row = process_rows[0] if process_rows else {}
-                    sample = {"sampled_at": sampled_at, "scope": "loadtest_client_process", **row}
+                    sample = {"sampled_at": sampled_at, "scope": "loadtest_client_process",
+                              "concurrency_tier": self.current_concurrency_tier, **row}
+                    for key in ("disk_read_bytes", "disk_write_bytes", "disk_read_bytes_per_second",
+                                "disk_write_bytes_per_second", "file_handles"):
+                        if key not in sample:
+                            sample[key] = None
+                            sample[f"{key}_unavailable_reason"] = "process_metric_unavailable"
                     sample["system_cpu_percent"] = psutil.cpu_percent(interval=None)
                     sample["system_memory_percent"] = psutil.virtual_memory().percent
+                try:
+                    network = psutil.net_io_counters()
+                    if network is None:
+                        raise OSError("network_counters_unavailable")
+                    sent, received = int(network.bytes_sent), int(network.bytes_recv)
+                    prior = self._network_baseline
+                    sample.update({"network_scope": "host", "network_bytes_sent": sent,
+                                   "network_bytes_received": received})
+                    if prior is not None and sample_monotonic > prior[2] and sent >= prior[0] and received >= prior[1]:
+                        elapsed = sample_monotonic - prior[2]
+                        sample["network_bytes_sent_per_second"] = (sent - prior[0]) / elapsed
+                        sample["network_bytes_received_per_second"] = (received - prior[1]) / elapsed
+                    else:
+                        sample["network_bytes_sent_per_second"] = None
+                        sample["network_bytes_received_per_second"] = None
+                        sample["network_unavailable_reason"] = "baseline_unavailable" if prior is None else "counter_reset"
+                    self._network_baseline = (sent, received, sample_monotonic)
+                except (AttributeError, OSError, psutil.AccessDenied, TypeError, ValueError) as exc:
+                    sample.update({"network_scope": "host", "network_bytes_sent": None,
+                                   "network_bytes_received": None, "network_bytes_sent_per_second": None,
+                                   "network_bytes_received_per_second": None,
+                                   "network_unavailable_reason": type(exc).__name__})
                 self.samples.append(sample)
                 self._cpu_baselines = next_cpu_baselines
+                self._io_baselines = next_io_baselines
             except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
                 self.samples.append({"sampled_at": sampled_at, "scope": "process_tree_total",
                                      "error": type(exc).__name__})

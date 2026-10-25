@@ -517,6 +517,7 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
     file_jobs_by_tier: dict[str, int] = {}
     try:
         for level in args.concurrency:
+            sampler.current_concurrency_tier = level
             run_tag = f"c{level}-{uuid.uuid4().hex[:8]}"
             file_slots = level if args.mode == "file" else (
                 args.file_concurrency if args.mode == "mixed" else 0
@@ -551,6 +552,7 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
                         timeout_seconds=args.timeout,
                     ))
                 batch = await asyncio.gather(*tasks)
+                sampler.current_concurrency_tier = None
                 for item in batch:
                     if item.mode == "file":
                         item.audio_seconds = audio_seconds
@@ -603,6 +605,7 @@ async def run(args: argparse.Namespace) -> tuple[list[Any], list[dict[str, Any]]
                 ))
                 tasks.append(file_task)
             batch = await asyncio.gather(*tasks)
+            sampler.current_concurrency_tier = None
             for item in batch:
                 if isinstance(item, list):
                     results.extend(item)

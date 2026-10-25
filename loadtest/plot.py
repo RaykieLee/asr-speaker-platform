@@ -258,6 +258,38 @@ def _metrics_table(groups: list[tuple[str, str, list[dict[str, Any]]]]) -> str:
             headers + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
 
 
+_RESOURCE_METRICS = (
+    ("磁盘读取速率（MiB/s）", "disk_read_bytes_per_second", 1024 * 1024),
+    ("磁盘写入速率（MiB/s）", "disk_write_bytes_per_second", 1024 * 1024),
+    ("文件句柄数", "file_handles", 1),
+    ("网络接收速率（宿主机 MiB/s）", "network_bytes_received_per_second", 1024 * 1024),
+    ("网络发送速率（宿主机 MiB/s）", "network_bytes_sent_per_second", 1024 * 1024),
+)
+
+
+def _resource_tier_table(samples: list[dict[str, Any]]) -> str:
+    by_tier: dict[int, list[dict[str, Any]]] = {}
+    for sample in samples:
+        tier = sample.get("concurrency_tier")
+        if isinstance(tier, int) and not isinstance(tier, bool):
+            by_tier.setdefault(tier, []).append(sample)
+    if not by_tier:
+        return '<p class="note">资源样本没有并发档位标签（旧报告兼容）：不可按档位汇总。</p>'
+    headers = "".join(f"<th>{_esc(label)}</th>" for label, _, _ in _RESOURCE_METRICS)
+    rows = []
+    for tier, tier_samples in sorted(by_tier.items()):
+        cells = []
+        for _label, key, divisor in _RESOURCE_METRICS:
+            values = [value / divisor for sample in tier_samples if (value := _number(sample.get(key))) is not None]
+            p50, p95 = _percentile(values, 50), _percentile(values, 95)
+            cells.append(f"P50 {p50:.3f} / P95 {p95:.3f} · n={len(values)}" if p50 is not None
+                         else "不可评估")
+        rows.append(f"<tr><th>{tier} 路</th><td>{len(tier_samples)}</td>" +
+                    "".join(f"<td>{_esc(value)}</td>" for value in cells) + "</tr>")
+    return ("<div class=\"table-wrap\"><table><thead><tr><th>并发档位</th><th>采样数</th>" + headers +
+            "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+
+
 def render_html(report: dict[str, Any], source_name: str = "report.json") -> str:
     """Return offline HTML containing SVG charts and no session transcript text."""
     if not isinstance(report, dict):
@@ -271,10 +303,16 @@ def render_html(report: dict[str, Any], source_name: str = "report.json") -> str
     config_levels = ", ".join(map(str, levels)) if levels else "未记录"
     resource_cpu = _polyline_chart("CPU 使用率", samples, "cpu_percent", "%", _COLORS[0])
     resource_rss = _polyline_chart("RSS 常驻内存", samples, "rss_bytes", "MiB", _COLORS[1], 1024 * 1024)
+    disk_read = _polyline_chart("磁盘读取速率", samples, "disk_read_bytes_per_second", "MiB/s", _COLORS[2], 1024 * 1024)
+    disk_write = _polyline_chart("磁盘写入速率", samples, "disk_write_bytes_per_second", "MiB/s", _COLORS[3], 1024 * 1024)
+    handles = _polyline_chart("文件句柄数", samples, "file_handles", "句柄", _COLORS[4], decimals=0)
+    network_recv = _polyline_chart("网络接收速率（宿主机）", samples, "network_bytes_received_per_second", "MiB/s", _COLORS[0], 1024 * 1024)
+    network_sent = _polyline_chart("网络发送速率（宿主机）", samples, "network_bytes_sent_per_second", "MiB/s", _COLORS[1], 1024 * 1024)
     return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>负载测试报告图表</title><style>
 *{{box-sizing:border-box}}body{{margin:0;background:#f4f6fa;color:#20283a;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}}main{{max-width:1180px;margin:auto;padding:28px 22px 48px}}h1{{font-size:25px;margin:0 0 6px}}h2{{font-size:17px;margin:0 0 14px}}p,small{{color:#737e91}}.meta{{font-size:12px;margin:0 0 20px}}.card{{background:#fff;border:1px solid #e5e9f0;border-radius:13px;padding:17px;margin:14px 0;box-shadow:0 3px 12px #26365d08}}.chart-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}svg{{display:block;width:100%;height:auto;overflow:visible}}.chart-title{{font-size:13px;font-weight:650;fill:#3b465b}}.axis-label,.empty-label{{font-size:10px;fill:#8993a4}}.group-label{{font-size:10px;fill:#526078}}.grid{{stroke:#e9edf3;stroke-width:1}}.grid.vertical{{stroke-dasharray:3 4}}.empty-chart{{fill:#fafbfe;stroke:#eef1f6}}table{{border-collapse:collapse;width:100%;font-size:11px;white-space:nowrap}}th,td{{padding:9px 10px;border-bottom:1px solid #edf0f4;text-align:left}}th{{color:#69758a;font-weight:600}}td{{color:#465269}}.table-wrap{{overflow:auto}}.note{{font-size:11px;line-height:1.7}}code{{background:#f1f3f7;border-radius:4px;padding:2px 5px}}@media(max-width:760px){{main{{padding:18px 12px}}.chart-grid{{grid-template-columns:1fr}}.card{{padding:13px}}}}
 </style></head><body><main><h1>负载测试报告图表</h1><p class="meta">来源：{_esc(source_name)} · 模式：{_esc(config.get('mode') or '未记录')} · 并发档位：{_esc(config_levels)} · 资源范围：{_esc(scope)}</p>
-<section class="card"><h2>服务资源随时间变化</h2><div class="chart-grid">{resource_cpu}{resource_rss}</div><p class="note">只绘制报告中有时间戳且有数值的采样点；缺失资源数据会显示为不可评估，不会补零。</p></section>
+<section class="card"><h2>资源指标（按并发档位）</h2>{_resource_tier_table(samples)}</section>
+<section class="card"><h2>资源随时间变化</h2><div class="chart-grid">{resource_cpu}{resource_rss}{disk_read}{disk_write}{handles}{network_recv}{network_sent}</div><p class="note">磁盘与文件句柄为采样进程树汇总；网络计数器是宿主机级，包含同机压测客户端及其他进程流量。只绘制有数值的采样点；缺失数据显示为不可评估，不会补零。</p></section>
 <section class="card"><h2>并发档位表现</h2>{_tier_chart(groups)}{_latency_chart(groups)}{_metrics_table(groups)}</section>
 <section class="card note"><strong>指标口径</strong><p>成功率按各并发档位与负载模式内的会话数计算；成功表示 <code>completed=true</code> 且无错误。延迟显示可用样本的线性插值 P50/P95。首个 final 片段到达时间从会话开始计时，包含音频播放时长；它不表示音频结束后的识别延迟。报告未提供的指标会标为不可评估。图表不会展示会话的原始转写文本。</p></section></main></body></html>'''
 
