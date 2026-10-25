@@ -51,6 +51,18 @@ def _reason_summary(samples: list[dict[str, Any]], key: str) -> str | None:
     return "、".join(labels[:3]) if labels else None
 
 
+def _missing_note(samples: list[dict[str, Any]], key: str) -> str | None:
+    missing = [sample for sample in samples if _number(sample.get(key)) is None]
+    if not missing:
+        return None
+    counts: dict[str, int] = {}
+    for sample in missing:
+        label = _metric_reason(sample, key) or "其他原因未记录"
+        counts[label] = counts.get(label, 0) + 1
+    reasons = "、".join(f"{label}（{count}）" for label, count in list(counts.items())[:3])
+    return f"缺失 {len(missing)} 次：{reasons}"
+
+
 def _number(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -95,8 +107,8 @@ def _polyline_chart(title: str, samples: list[dict[str, Any]], key: str,
     timed = [(stamp, value / divisor) for stamp, value in series if stamp is not None and value is not None]
     heading = f'<text x="{left}" y="21" class="chart-title">{_esc(title)}</text>'
     if not timed:
-        reason = _reason_summary(samples, key)
-        empty_message = f"不可评估：{reason}" if reason else "不可评估：没有可用采样数据"
+        missing_note = _missing_note(samples, key)
+        empty_message = f"不可评估：{missing_note}" if missing_note else "不可评估：没有可用采样数据"
         return (f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{_esc(title)}">'
                 f'{heading}<rect class="empty-chart" x="{left}" y="{top}" width="{plot_w}" height="{plot_h}" rx="8"/>'
                 f'<text x="{left + plot_w/2:.1f}" y="{top + plot_h/2:.1f}" text-anchor="middle" class="empty-label">{_esc(empty_message)}</text></svg>')
@@ -110,6 +122,9 @@ def _polyline_chart(title: str, samples: list[dict[str, Any]], key: str,
     x_ticks = 4
     y_ticks = 4
     parts = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{_esc(title)}">', heading]
+    missing_note = _missing_note(samples, key)
+    if missing_note:
+        parts.append(f'<text x="{left}" y="{top-5}" class="axis-label">{_esc(missing_note)}</text>')
     for idx in range(y_ticks + 1):
         fraction = idx / y_ticks
         y = top + plot_h * fraction
@@ -320,11 +335,12 @@ def _resource_tier_table(samples: list[dict[str, Any]]) -> str:
         for _label, key, divisor in _RESOURCE_METRICS:
             values = [value / divisor for sample in tier_samples if (value := _number(sample.get(key))) is not None]
             p50, p95 = _percentile(values, 50), _percentile(values, 95)
-            reason = _reason_summary(tier_samples, key)
-            cells.append(f"P50 {p50:.3f} / P95 {p95:.3f} · n={len(values)}" if p50 is not None
-                         else f"不可评估（{reason}）" if reason else "不可评估")
+            summary = (f"P50 {p50:.3f} / P95 {p95:.3f} · n={len(values)}" if p50 is not None
+                       else "不可评估")
+            missing_note = _missing_note(tier_samples, key)
+            cells.append(_esc(summary) + (f"<br><small>{_esc(missing_note)}</small>" if missing_note else ""))
         rows.append(f"<tr><th>{tier} 路</th><td>{len(tier_samples)}</td>" +
-                    "".join(f"<td>{_esc(value)}</td>" for value in cells) + "</tr>")
+                    "".join(f"<td>{value}</td>" for value in cells) + "</tr>")
     return ("<div class=\"table-wrap\"><table><thead><tr><th>并发档位</th><th>采样数</th>" + headers +
             "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
 

@@ -221,9 +221,24 @@ def test_resource_unavailable_reasons_use_safe_labels_and_hide_unknown_details()
         "file_handles": None,
         "file_handles_unavailable_reason": "/private/path/to/process",
     }]})
-    assert "不可评估：权限不足" in report
-    assert "不可评估（权限不足）" in report
+    assert "不可评估：缺失 1 次：权限不足（1）" in report
+    assert "缺失 1 次：权限不足（1）" in report
     assert "/private/path/to/process" not in report
+
+
+def test_resource_chart_and_tier_table_explain_partial_missing_samples():
+    report = render_html({"config": {}, "sessions": [], "resource_samples": [
+        {"sampled_at": "2026-10-25T10:00:00+00:00", "scope": "process_tree_total",
+         "concurrency_tier": 4, "disk_read_bytes_per_second": 1024,
+         "file_handles": 9},
+        {"sampled_at": "2026-10-25T10:00:01+00:00", "scope": "process_tree_total",
+         "concurrency_tier": 4, "disk_read_bytes_per_second": None,
+         "disk_read_bytes_per_second_unavailable_reason": "AccessDenied",
+         "file_handles": None, "file_handles_unavailable_reason": "unsupported_platform"},
+    ]})
+    assert "缺失 1 次：权限不足（1）" in report
+    assert "缺失 1 次：当前平台不支持（1）" in report
+    assert "P50 0.001 / P95 0.001 · n=1" in report
 
 
 def test_final_speaker_events_deduplicate_by_segment_and_revision_without_exposing_payload():
