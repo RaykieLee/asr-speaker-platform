@@ -199,6 +199,12 @@ async def lifespan(application: FastAPI):
             model_files, vocab, bpe_model = _asr_paths(directory, online=False)
             offline_hotwords = _hotword_service(database, directory, mode="offline", bpe_model=bpe_model)
             application.state.offline_hotword_service = offline_hotwords
+            # The API writes the shared hotword set through the online service.
+            # Validate against the offline model too before either create or
+            # update reaches SQLite, since file transcription uses its tokenizer.
+            online_hotwords = application.state.hotword_service
+            if online_dir and online_hotwords is not None:
+                online_hotwords.preflight_compilers.append(offline_hotwords.compiler)
             if online_dir and not worker_process:
                 application.state.live_final_service = LiveFinalProcess({
                     "encoder": str(model_files.encoder), "decoder": str(model_files.decoder),

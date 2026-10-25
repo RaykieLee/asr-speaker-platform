@@ -98,6 +98,40 @@ def test_model_capability_vocab_and_unknown_token_fail_before_writing(tmp_path):
     store.close()
 
 
+def test_dual_model_preflight_rejects_create_and_update_before_writing(tmp_path):
+    store, service = _service(tmp_path)
+    offline_compiler = HotwordCompiler(
+        lambda text: list(text), mode="offline", vocabulary=set("张三"),
+    )
+    service.preflight_compilers.append(offline_compiler)
+    app = FastAPI()
+    app.state.hotword_service = service
+    app.include_router(router)
+
+    with TestClient(app) as client:
+        rejected = client.post("/api/v1/hotword-sets", json={
+            "name": "offline-incompatible", "entries": ["李梅"],
+        })
+        assert rejected.status_code == 422
+        assert rejected.json()["code"] == "HOTWORD_TOKEN_NOT_COVERED"
+        assert service.list_sets() == []
+
+        created = client.post("/api/v1/hotword-sets", json={
+            "name": "shared", "entries": ["张三"],
+        })
+        assert created.status_code == 201
+        set_id = created.json()["set_id"]
+        rejected_update = client.put(f"/api/v1/hotword-sets/{set_id}", json={
+            "expected_version": 1, "entries": ["李梅"],
+        })
+        assert rejected_update.status_code == 422
+        assert rejected_update.json()["code"] == "HOTWORD_TOKEN_NOT_COVERED"
+        unchanged = service.get(set_id)
+        assert unchanged["version"] == 1
+        assert unchanged["entries"][0]["word"] == "张三"
+        assert len(store._query_all("SELECT * FROM hotword_set_versions WHERE set_id=?", (set_id,))) == 1
+    store.close()
+
 def test_bpe_compilation_uses_the_model_tokenizer_and_vocabulary(tmp_path):
     store = SQLiteStore(tmp_path / "bpe.sqlite3")
     store.initialize()

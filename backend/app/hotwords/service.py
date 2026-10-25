@@ -153,6 +153,15 @@ class HotwordService:
     def __init__(self, store: SQLiteStore, compiler: HotwordCompiler):
         self.store = store
         self.compiler = compiler
+        # Additional model compilers are used when one hotword set is shared
+        # by online and offline recognizers with different tokenizers.
+        self.preflight_compilers: list[HotwordCompiler] = []
+
+    def _compile_for_all_models(self, entries: list[dict[str, Any]], weight: float) -> dict[str, Any]:
+        compiled = self.compiler.compile(entries, weight)
+        for compiler in self.preflight_compilers:
+            compiler.compile(entries, weight)
+        return compiled
 
     def create(
         self,
@@ -166,7 +175,7 @@ class HotwordService:
         clean_name = _validate_name(name)
         clean_entries = normalize_entries(entries)
         clean_weight = _validate_weight(weight)
-        compiled = self.compiler.compile(clean_entries, clean_weight)
+        compiled = self._compile_for_all_models(clean_entries, clean_weight)
         created = self.store.create_hotword_set(
             clean_name, clean_entries, weight=clean_weight, tenant_id=tenant_id,
             created_by=created_by, compiled=compiled,
@@ -227,7 +236,7 @@ class HotwordService:
             raise HotwordNotFoundError(set_id)
         if current_set["status"] != "active":
             raise ValueError("已停用的热词集不能继续编辑。")
-        compiled = self.compiler.compile(clean_entries, clean_weight)
+        compiled = self._compile_for_all_models(clean_entries, clean_weight)
         if clean_name is None:
             try:
                 self.store.append_hotword_version(
