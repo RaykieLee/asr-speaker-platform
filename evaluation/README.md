@@ -43,3 +43,31 @@ uv run python -m evaluation.quality \
 ```
 
 Store `data/private-eval/` outside Git. Human labels and ASR transcripts can contain personal or confidential speech: use authorized recordings, restrict access, redact names/IDs where appropriate, and do not commit raw recordings, transcripts, or reports containing sensitive metadata. Reports contain aggregate metrics only and do not copy transcript text.
+
+## Public AISHELL-4 clip workflow
+
+The helper scripts below accept an AISHELL-4 FLAC recording and its Praat TextGrid. Obtain both files from the official AISHELL-4 distribution and follow that distribution's access and use terms. Keep the downloaded corpus, generated clip, annotations, platform output JSON, and metrics outside Git.
+
+The converter needs the optional `soundfile` and `textgrid` Python packages. They are not runtime dependencies of the service; install them in the evaluation environment as needed (for example, `uv add --dev soundfile textgrid`). NumPy is already a project dependency. Conversion reads only the requested source range, mixes channels to mono, resamples with a NumPy windowed-sinc filter, then writes 16 kHz PCM16 WAV. TextGrid intervals are clipped to that range; times in the annotation are relative to the exported WAV, and the TextGrid tier name is retained as `speaker_id`. `<sil>` and `<#>` markers, whitespace, and Unicode punctuation are removed from reference text.
+
+```sh
+uv run python scripts/prepare_aishell4_eval.py \
+  --audio data/datasets/aishell4/M_R003S02C01.flac \
+  --textgrid data/datasets/aishell4/M_R003S02C01.TextGrid \
+  --start 60 --end 120 \
+  --wav /tmp/aishell4-60-120.wav \
+  --annotation /tmp/aishell4-60-120.annotation.json \
+  --hotwords '商场,客流量'
+```
+
+Run the same exported WAV twice with matched model/configuration and the same manually selected hotword list, changing only whether the platform hotword feature is enabled. Save each platform's own returned transcript and speaker IDs as JSON with the output schema above; never add reference text or hotword terms to a prediction. Then compare both outputs:
+
+```sh
+uv run python scripts/compare_public_outputs.py \
+  --annotation /tmp/aishell4-60-120.annotation.json \
+  --enabled /tmp/platform-enabled.json \
+  --disabled /tmp/platform-disabled.json \
+  --out /tmp/aishell4-comparison.json
+```
+
+The comparison calculates Chinese CER over the globally concatenated, start-time-ordered reference and hypothesis text after removing whitespace, punctuation, and the two TextGrid markers. It also includes the existing `evaluation.quality` speaker metrics and, for each run, hotword hits among terms present in the reference and insertions among terms absent from it. The hotword list is a manually chosen test condition; it is never injected into either platform output. Treat the enabled/disabled difference as a paired observation, not a causal estimate if any other setting or input differs.
