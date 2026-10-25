@@ -367,7 +367,7 @@ def test_queued_job_keeps_compiled_weight_after_set_update_and_worker_restart(tm
         database.close()
 
 
-@pytest.mark.parametrize("weight", [0, -1, float("nan"), float("inf"), "2.5", True])
+@pytest.mark.parametrize("weight", [0, -1, 20.1, float("nan"), float("inf"), "2.5", True])
 def test_compiled_hotword_snapshot_rejects_invalid_weight(tmp_path, weight):
     database, files = make_storage(tmp_path)
     service = TranscriptionService(

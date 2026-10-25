@@ -74,7 +74,8 @@ def _resolve_hotword_value(resolved: Any) -> tuple[list[str | list[str]], int]:
         try:
             valid_weight = (not isinstance(compiled_weight, bool) and
                             isinstance(compiled_weight, (int, float)) and
-                            math.isfinite(float(compiled_weight)) and compiled_weight > 0)
+                            math.isfinite(float(compiled_weight)) and
+                            0 < compiled_weight <= 20)
         except (OverflowError, TypeError, ValueError):
             valid_weight = False
         if not valid_weight:
