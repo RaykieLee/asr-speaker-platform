@@ -13,6 +13,42 @@ from typing import Any
 
 _RUN_LEVEL = re.compile(r"^c(\d+)-")
 _COLORS = ("#506bd8", "#27a37e", "#e59b3b", "#9a68c9", "#d05b64")
+_REASON_LABELS = {
+    "baseline_unavailable": "尚无速率基线",
+    "counter_reset": "累计计数器重置",
+    "process_unavailable": "进程不可用",
+    "process_metric_unavailable": "进程指标不可用",
+    "unsupported_platform": "当前平台不支持",
+    "AccessDenied": "权限不足",
+    "PermissionError": "权限不足",
+    "NoSuchProcess": "进程已退出",
+    "ProcessLookupError": "进程已退出",
+    "AttributeError": "系统接口不支持",
+    "OSError": "系统接口读取失败",
+    "TypeError": "系统接口返回无效数据",
+    "ValueError": "系统接口返回无效数据",
+}
+
+
+def _metric_reason(sample: dict[str, Any], key: str) -> str | None:
+    """Translate known reason codes only; never expose arbitrary report text."""
+    reason_keys = [f"{key}_unavailable_reason"]
+    if key.startswith("disk_read_") or key.startswith("disk_write_"):
+        direction = "read" if key.startswith("disk_read_") else "write"
+        reason_keys.extend((f"disk_{direction}_rate_unavailable_reason", "disk_io_unavailable_reason"))
+    elif key.startswith("network_"):
+        reason_keys.append("network_unavailable_reason")
+    for reason_key in reason_keys:
+        reason = sample.get(reason_key)
+        if isinstance(reason, str) and reason in _REASON_LABELS:
+            return _REASON_LABELS[reason]
+    return None
+
+
+def _reason_summary(samples: list[dict[str, Any]], key: str) -> str | None:
+    labels = list(dict.fromkeys(label for sample in samples
+                                if (label := _metric_reason(sample, key)) is not None))
+    return "、".join(labels[:3]) if labels else None
 
 
 def _number(value: Any) -> float | None:
@@ -59,9 +95,11 @@ def _polyline_chart(title: str, samples: list[dict[str, Any]], key: str,
     timed = [(stamp, value / divisor) for stamp, value in series if stamp is not None and value is not None]
     heading = f'<text x="{left}" y="21" class="chart-title">{_esc(title)}</text>'
     if not timed:
+        reason = _reason_summary(samples, key)
+        empty_message = f"不可评估：{reason}" if reason else "不可评估：没有可用采样数据"
         return (f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{_esc(title)}">'
                 f'{heading}<rect class="empty-chart" x="{left}" y="{top}" width="{plot_w}" height="{plot_h}" rx="8"/>'
-                f'<text x="{left + plot_w/2:.1f}" y="{top + plot_h/2:.1f}" text-anchor="middle" class="empty-label">不可评估：没有可用采样数据</text></svg>')
+                f'<text x="{left + plot_w/2:.1f}" y="{top + plot_h/2:.1f}" text-anchor="middle" class="empty-label">{_esc(empty_message)}</text></svg>')
     base_time = min(stamp for stamp, _ in timed)
     points = [(max(0.0, (stamp - base_time).total_seconds()), value) for stamp, value in timed]
     duration = max((x for x, _ in points), default=0.0)
@@ -282,8 +320,9 @@ def _resource_tier_table(samples: list[dict[str, Any]]) -> str:
         for _label, key, divisor in _RESOURCE_METRICS:
             values = [value / divisor for sample in tier_samples if (value := _number(sample.get(key))) is not None]
             p50, p95 = _percentile(values, 50), _percentile(values, 95)
+            reason = _reason_summary(tier_samples, key)
             cells.append(f"P50 {p50:.3f} / P95 {p95:.3f} · n={len(values)}" if p50 is not None
-                         else "不可评估")
+                         else f"不可评估（{reason}）" if reason else "不可评估")
         rows.append(f"<tr><th>{tier} 路</th><td>{len(tier_samples)}</td>" +
                     "".join(f"<td>{_esc(value)}</td>" for value in cells) + "</tr>")
     return ("<div class=\"table-wrap\"><table><thead><tr><th>并发档位</th><th>采样数</th>" + headers +

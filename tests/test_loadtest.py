@@ -213,6 +213,19 @@ def test_resource_charts_show_new_metrics_and_legacy_reports_as_unavailable():
     assert "4 路" in report and "P50 0.000 / P95 0.000" in report
 
 
+def test_resource_unavailable_reasons_use_safe_labels_and_hide_unknown_details():
+    report = render_html({"config": {}, "sessions": [], "resource_samples": [{
+        "sampled_at": "2026-10-25T10:00:00+00:00", "scope": "process_tree_total",
+        "concurrency_tier": 2, "disk_read_bytes_per_second": None,
+        "disk_read_rate_unavailable_reason": "AccessDenied",
+        "file_handles": None,
+        "file_handles_unavailable_reason": "/private/path/to/process",
+    }]})
+    assert "不可评估：权限不足" in report
+    assert "不可评估（权限不足）" in report
+    assert "/private/path/to/process" not in report
+
+
 def test_final_speaker_events_deduplicate_by_segment_and_revision_without_exposing_payload():
     metrics = aggregate_final_speaker_events([
         {"type": "segment", "status": "final", "segment_id": "1", "revision": 1,
