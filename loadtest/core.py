@@ -472,6 +472,8 @@ class ResourceSampler:
                                    "disk_host_write_bytes": None,
                                    "disk_host_read_bytes_per_second": None,
                                    "disk_host_write_bytes_per_second": None,
+                                   "disk_host_read_rate_unavailable_reason": type(exc).__name__,
+                                   "disk_host_write_rate_unavailable_reason": type(exc).__name__,
                                    "disk_host_read_unavailable_reason": type(exc).__name__,
                                    "disk_host_write_unavailable_reason": type(exc).__name__})
                 try:

@@ -292,6 +292,18 @@ def test_resource_chart_and_tier_table_explain_partial_missing_samples():
     assert "P50 0.001 / P95 0.001 · n=1" in report
 
 
+def test_host_disk_access_denied_reason_is_mapped_in_chart_and_tier_table():
+    report = render_html({"config": {}, "sessions": [], "resource_samples": [{
+        "sampled_at": "2026-10-25T10:00:00+00:00", "scope": "process_tree_total",
+        "concurrency_tier": 1, "disk_host_scope": "host",
+        "disk_host_read_bytes_per_second": None,
+        "disk_host_read_rate_unavailable_reason": "AccessDenied",
+    }]})
+    assert "不可评估：缺失 1 次：权限不足（1）" in report
+    assert "缺失 1 次：权限不足（1）" in report
+    assert "AccessDenied" not in report
+
+
 def test_final_speaker_events_deduplicate_by_segment_and_revision_without_exposing_payload():
     metrics = aggregate_final_speaker_events([
         {"type": "segment", "status": "final", "segment_id": "1", "revision": 1,
