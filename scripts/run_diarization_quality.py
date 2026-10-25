@@ -69,9 +69,21 @@ def _model_files(model_dir: Path) -> tuple[Path, Path, Path, Path, Path | None]:
     return encoder, decoder, joiner, tokens, vocabs[0].resolve() if vocabs else None
 
 
-def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _load_recognizer(model_dir: Path, asr_version: str,
+                     model_files: tuple[Path, Path, Path, Path, Path | None]) -> Any:
     from backend.app.engines.base import ModelArtifact
     from backend.app.engines.sherpa_offline import OfflineTransducerFiles, SherpaOfflineRecognizer
+
+    encoder, decoder, joiner, tokens, vocab = model_files
+    files = OfflineTransducerFiles(encoder, decoder, joiner, tokens)
+    artifact = ModelArtifact(model_dir.name, "transducer", asr_version,
+                             (encoder, decoder, joiner, tokens))
+    return SherpaOfflineRecognizer.load(
+        artifact, files, modeling_unit="cjkchar+bpe", bpe_vocab=vocab,
+    )
+
+
+def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     from backend.app.pipelines.file_asr import FileASRService
     from backend.app.speakers.diarization import SherpaOfflineDiarizer
     from backend.app.speakers.matching import SpeakerMatcher
@@ -91,14 +103,10 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise ReplayError(f"cannot read annotation {annotation}: {exc}") from exc
 
-    encoder, decoder, joiner, tokens, vocab = _model_files(model_dir)
+    model_files = _model_files(model_dir)
+    encoder, decoder, joiner, tokens, vocab = model_files
     asr_version = args.asr_version or model_dir.name
-    files = OfflineTransducerFiles(encoder, decoder, joiner, tokens)
-    recognizer = SherpaOfflineRecognizer.load(
-        ModelArtifact(model_dir.name, "transducer", asr_version,
-                      tuple(p for p in (encoder, decoder, joiner, tokens) if p)),
-        files, bpe_vocab=vocab,
-    )
+    recognizer = _load_recognizer(model_dir, asr_version, model_files)
     diarizer = SherpaOfflineDiarizer.load(segmentation, embedding,
         num_speakers=args.num_speakers, cluster_threshold=args.cluster_threshold)
     extractor = SherpaSpeakerEmbeddingAdapter(SpeakerModel(embedding, args.speaker_model_version))

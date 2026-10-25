@@ -37,3 +37,23 @@ def test_model_directory_requires_unambiguous_artifacts(tmp_path):
         assert "exactly one encoder" in str(exc)
     else:
         raise AssertionError("ambiguous model directory must fail")
+
+
+def test_recognizer_uses_platform_modeling_unit_and_vocab(tmp_path, monkeypatch):
+    from backend.app.engines.sherpa_offline import SherpaOfflineRecognizer
+
+    model_dir = tmp_path / "offline-model"
+    vocab = model_dir / "bpe.vocab"
+    vocab.parent.mkdir()
+    vocab.touch()
+    artifacts = tuple(model_dir / name for name in
+                      ("encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt")) + (vocab,)
+    captured = {}
+
+    def fake_load(cls, model, files, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(SherpaOfflineRecognizer, "load", classmethod(fake_load))
+    replay._load_recognizer(model_dir, "offline-v1", artifacts)
+    assert captured == {"modeling_unit": "cjkchar+bpe", "bpe_vocab": vocab}
