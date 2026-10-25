@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -17,12 +18,39 @@ class ReplayError(Exception):
     pass
 
 
+def _reject_wal(database: Path) -> None:
+    wal = Path(f"{database}-wal")
+    if wal.exists():
+        raise ReplayError(f"registration database has a WAL file: {wal}; create a consistent backup or stop writers and remove sidecars before replay")
+
+
+def _assert_unchanged(path: Path, expected_hash: str) -> None:
+    if sha256(path) != expected_hash:
+        raise ReplayError(f"registration database changed during replay: {path}; use a static snapshot")
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _write_private(path: Path, payload: str) -> None:
+    """Create or replace a JSON artifact with private permissions from the outset."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _one(directory: Path, pattern: str, label: str) -> Path:
@@ -35,7 +63,7 @@ def _one(directory: Path, pattern: str, label: str) -> Path:
 class ReadOnlyProfiles:
     """Minimal SpeakerMatcher store backed by SQLite opened in mode=ro."""
     def __init__(self, path: Path):
-        uri = f"file:{quote(str(path.resolve()))}?mode=ro"
+        uri = f"file:{quote(str(path.resolve()))}?mode=ro&immutable=1"
         self.connection = sqlite3.connect(uri, uri=True)
         self.connection.row_factory = sqlite3.Row
 
@@ -96,6 +124,8 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[
     for path in (audio, annotation, database, segmentation, embedding):
         if not path.is_file():
             raise ReplayError(f"required input file does not exist: {path}")
+    _reject_wal(database)
+    registry_hash_before = sha256(database)
     try:
         annotation_data = json.loads(annotation.read_text(encoding="utf-8"))
         if not isinstance(annotation_data, dict):
@@ -116,6 +146,8 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[
         result = FileASRService(recognizer, diarizer=diarizer, speaker_matcher=matcher).transcribe_file(audio)
     finally:
         profiles.close()
+    _reject_wal(database)
+    _assert_unchanged(database, registry_hash_before)
 
     output = {"model_version": result.model_version, "speaker_diarization": result.speaker_diarization,
               "speaker_mappings": list(result.speaker_mappings), "segments": [
@@ -160,17 +192,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         output, metrics, manifest = run(args)
+        _reject_wal(args.registry.resolve())
         outdir = args.output_dir.resolve()
         outdir.mkdir(parents=True, exist_ok=True)
+        outdir.chmod(0o700)
         result_path, metrics_path, manifest_path = (outdir / "result.json", outdir / "metrics.json", outdir / "run-manifest.json")
         result_payload = json.dumps(output, ensure_ascii=False, indent=2) + "\n"
         metrics_payload = json.dumps(metrics, ensure_ascii=False, indent=2) + "\n"
         # Write both artifacts before the manifest, which records their final hashes.
-        result_path.write_text(result_payload, encoding="utf-8")
-        metrics_path.write_text(metrics_payload, encoding="utf-8")
+        _write_private(result_path, result_payload)
+        _write_private(metrics_path, metrics_payload)
         manifest["outputs"] = {"result": {"path": str(result_path), "sha256": sha256(result_path)},
                                "metrics": {"path": str(metrics_path), "sha256": sha256(metrics_path)}}
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _write_private(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     except Exception as exc:
         print(f"quality replay failed: {exc}", file=sys.stderr)
         return 2
