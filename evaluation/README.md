@@ -95,3 +95,14 @@ uv run python scripts/compare_public_outputs.py \
 ```
 
 The comparison calculates Chinese CER over the globally concatenated, start-time-ordered reference and hypothesis text after removing whitespace, punctuation, and the two TextGrid markers. TextGrid intervals from different speakers can overlap, making one global reference order ambiguous. If any reference overlap exists, CER is marked `not_evaluable_overlapping_reference`; the report gives overlapping seconds and the non-overlapping speech coverage ratio. It also includes the existing `evaluation.quality` speaker metrics and, for each run, hotword hits among terms present in the reference and insertions among terms absent from it. The enabled output must contain a non-empty `hotword_set_id`; the disabled output must contain `hotword_set_id: null`. The hotword list is a manually chosen test condition; it is never injected into either platform output. Treat the enabled/disabled difference as a paired observation, not a causal estimate if any other setting or input differs.
+
+For an isolated **offline model-level** hotword test, run the same WAV through sherpa twice with the same model settings. This excludes upload, VAD, segmentation, diarization, and the platform API. `--hotword` takes a phrase and optional per-phrase `:score` in the range `(0, 20]`; the normalized phrase set must equal `annotation.hotword_targets`. The script rejects overlapping reference segments, writes raw hypotheses only to a private output directory, and records input/model hashes, parameters, timings, CER, target hits, and absent-term insertions in a manifest. Keep that directory outside Git. Example using the prepared 24–90 second clip:
+
+```sh
+uv run --with soundfile python scripts/run_hotword_pair.py \
+  --wav data/datasets/aishell4/clips/asr-hotword.wav \
+  --annotation data/datasets/aishell4/v3-asr-hotword.annotation.json \
+  --out-dir data/datasets/aishell4/hotword-pair-score1 \
+  --hotword '商场:1' --hotword '客流量:1' --hotword '家电:1' \
+  --hotword '女装:1' --hotword '销售策略:1' --hotword '电子:1'
+```
