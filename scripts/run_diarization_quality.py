@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+# Direct ``python scripts/run_diarization_quality.py`` execution places only
+# the scripts directory on sys.path. Add the repository root so project
+# packages resolve the same way as ``python -m`` and pytest.
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
 
 class ReplayError(Exception):
     pass

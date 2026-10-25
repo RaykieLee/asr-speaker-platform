@@ -1,8 +1,28 @@
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 
 from scripts import run_diarization_quality as replay
+
+
+def test_script_direct_entrypoint_and_project_import_from_outside_repo(tmp_path):
+    script = replay.Path(__file__).resolve().parents[1] / "scripts" / "run_diarization_quality.py"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    help_result = subprocess.run([sys.executable, str(script), "--help"], cwd=tmp_path,
+                                 env=env, capture_output=True, text=True, check=False)
+    assert help_result.returncode == 0, help_result.stderr
+    assert "--annotation" in help_result.stdout
+
+    import_result = subprocess.run(
+        [sys.executable, "-c",
+         "import runpy,sys; runpy.run_path(sys.argv[1], run_name='replay_import_smoke'); "
+         "import evaluation.quality; import backend.app.pipelines.file_asr",
+         str(script)], cwd=tmp_path, env=env, capture_output=True, text=True, check=False,
+    )
+    assert import_result.returncode == 0, import_result.stderr
 
 
 def test_cli_writes_hashed_artifacts_and_exact_parameters(tmp_path, monkeypatch):
