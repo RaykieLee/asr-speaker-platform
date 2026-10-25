@@ -67,7 +67,8 @@ def test_recognizer_uses_platform_modeling_unit_and_vocab(tmp_path, monkeypatch)
 
     monkeypatch.setattr(SherpaOfflineRecognizer, "load", classmethod(fake_load))
     replay._load_recognizer(model_dir, "offline-v1", artifacts)
-    assert captured == {"modeling_unit": "cjkchar+bpe", "bpe_vocab": vocab}
+    assert captured == {"modeling_unit": "cjkchar+bpe", "decoding_method": "modified_beam_search",
+                        "num_threads": 2, "bpe_vocab": vocab}
 
 
 def test_registration_wal_is_rejected_even_when_empty(tmp_path):
@@ -107,3 +108,31 @@ def test_registry_change_during_replay_is_rejected(tmp_path):
         assert "changed during replay" in str(exc)
     else:
         raise AssertionError("registry mutation during replay must fail closed")
+
+
+def test_any_input_change_during_replay_is_rejected(tmp_path):
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"original audio")
+    snapshot = replay._snapshot_inputs({"audio": audio})
+    audio.write_bytes(b"changed audio")
+    try:
+        replay._assert_inputs_unchanged(snapshot)
+    except replay.ReplayError as exc:
+        assert "input changed during replay (audio)" in str(exc)
+    else:
+        raise AssertionError("mutated inference input must fail closed")
+
+
+def test_runtime_provenance_and_fixed_inference_parameters():
+    runtime = replay._runtime_provenance()
+    assert runtime["python_version"]
+    assert "sherpa_onnx_version" in runtime
+    assert "git_commit" in runtime
+    assert replay.INFERENCE_CONFIG == {
+        "asr": {"modeling_unit": "cjkchar+bpe", "decoding_method": "modified_beam_search", "num_threads": 2},
+        "diarization": {"num_threads": 2, "provider": "cpu", "min_duration_on": 0.3, "min_duration_off": 0.5},
+        "speaker_embedding": {"num_threads": 1, "provider": "cpu"},
+        "speaker_matching": {"min_similarity": 0.55, "min_margin": 0.05,
+                             "min_segment_seconds": 1.0, "max_segments_per_speaker": 5,
+                             "min_segments_per_speaker": 2},
+    }

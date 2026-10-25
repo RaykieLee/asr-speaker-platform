@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +21,16 @@ class ReplayError(Exception):
     pass
 
 
+INFERENCE_CONFIG = {
+    "asr": {"modeling_unit": "cjkchar+bpe", "decoding_method": "modified_beam_search", "num_threads": 2},
+    "diarization": {"num_threads": 2, "provider": "cpu", "min_duration_on": 0.3, "min_duration_off": 0.5},
+    "speaker_embedding": {"num_threads": 1, "provider": "cpu"},
+    "speaker_matching": {"min_similarity": 0.55, "min_margin": 0.05,
+                         "min_segment_seconds": 1.0, "max_segments_per_speaker": 5,
+                         "min_segments_per_speaker": 2},
+}
+
+
 def _reject_wal(database: Path) -> None:
     wal = Path(f"{database}-wal")
     if wal.exists():
@@ -27,6 +40,34 @@ def _reject_wal(database: Path) -> None:
 def _assert_unchanged(path: Path, expected_hash: str) -> None:
     if sha256(path) != expected_hash:
         raise ReplayError(f"registration database changed during replay: {path}; use a static snapshot")
+
+
+def _snapshot_inputs(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
+    return {name: {"path": str(path), "sha256": sha256(path)} for name, path in paths.items()}
+
+
+def _assert_inputs_unchanged(snapshot: dict[str, dict[str, str]]) -> None:
+    for name, item in snapshot.items():
+        if sha256(Path(item["path"])) != item["sha256"]:
+            message = "registration database changed during replay" if name == "registration_database" else f"input changed during replay ({name})"
+            raise ReplayError(f"{message}: {item['path']}")
+
+
+def _runtime_provenance() -> dict[str, Any]:
+    try:
+        sherpa_version: str | None = importlib.metadata.version("sherpa-onnx")
+    except importlib.metadata.PackageNotFoundError:
+        sherpa_version = None
+    repo_root = Path(__file__).resolve().parent.parent
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = None
+    return {"python_version": platform.python_version(), "sherpa_onnx_version": sherpa_version,
+            "git_commit": commit}
 
 
 def sha256(path: Path) -> str:
@@ -107,7 +148,7 @@ def _load_recognizer(model_dir: Path, asr_version: str,
     artifact = ModelArtifact(model_dir.name, "transducer", asr_version,
                              (encoder, decoder, joiner, tokens))
     return SherpaOfflineRecognizer.load(
-        artifact, files, modeling_unit="cjkchar+bpe", bpe_vocab=vocab,
+        artifact, files, **INFERENCE_CONFIG["asr"], bpe_vocab=vocab,
     )
 
 
@@ -125,29 +166,35 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[
         if not path.is_file():
             raise ReplayError(f"required input file does not exist: {path}")
     _reject_wal(database)
-    registry_hash_before = sha256(database)
+    model_files = _model_files(model_dir)
+    encoder, decoder, joiner, tokens, vocab = model_files
+    asr_version = args.asr_version or model_dir.name
+    input_paths = {"audio": audio, "annotation": annotation, "registration_database": database,
+                   "asr_encoder": encoder, "asr_decoder": decoder, "asr_joiner": joiner,
+                   "asr_tokens": tokens, "segmentation_model": segmentation, "speaker_model": embedding}
+    if vocab:
+        input_paths["asr_bpe_vocab"] = vocab
+    input_snapshot = _snapshot_inputs(input_paths)
     try:
         annotation_data = json.loads(annotation.read_text(encoding="utf-8"))
         if not isinstance(annotation_data, dict):
             raise ValueError("annotation root must be an object")
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise ReplayError(f"cannot read annotation {annotation}: {exc}") from exc
-
-    model_files = _model_files(model_dir)
-    encoder, decoder, joiner, tokens, vocab = model_files
-    asr_version = args.asr_version or model_dir.name
     recognizer = _load_recognizer(model_dir, asr_version, model_files)
     diarizer = SherpaOfflineDiarizer.load(segmentation, embedding,
-        num_speakers=args.num_speakers, cluster_threshold=args.cluster_threshold)
-    extractor = SherpaSpeakerEmbeddingAdapter(SpeakerModel(embedding, args.speaker_model_version))
+        **INFERENCE_CONFIG["diarization"], num_speakers=args.num_speakers,
+        cluster_threshold=args.cluster_threshold)
+    extractor = SherpaSpeakerEmbeddingAdapter(
+        SpeakerModel(embedding, args.speaker_model_version, **INFERENCE_CONFIG["speaker_embedding"]))
     profiles = ReadOnlyProfiles(database)
     try:
-        matcher = SpeakerMatcher(profiles, extractor)
+        matcher = SpeakerMatcher(profiles, extractor, **INFERENCE_CONFIG["speaker_matching"])
         result = FileASRService(recognizer, diarizer=diarizer, speaker_matcher=matcher).transcribe_file(audio)
     finally:
         profiles.close()
     _reject_wal(database)
-    _assert_unchanged(database, registry_hash_before)
+    _assert_inputs_unchanged(input_snapshot)
 
     output = {"model_version": result.model_version, "speaker_diarization": result.speaker_diarization,
               "speaker_mappings": list(result.speaker_mappings), "segments": [
@@ -157,20 +204,17 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[
                    "metadata": segment.metadata or {}}
                   for segment in result.segments]}
     metrics = evaluate(annotation_data, output)
-    input_paths = {"audio": audio, "annotation": annotation, "registration_database": database,
-                   "asr_encoder": encoder, "asr_decoder": decoder, "asr_joiner": joiner,
-                   "asr_tokens": tokens, "segmentation_model": segmentation, "speaker_model": embedding}
-    if vocab:
-        input_paths["asr_bpe_vocab"] = vocab
     manifest = {
         "schema_version": 1,
         "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "parameters": {"cluster_threshold": args.cluster_threshold, "num_speakers": args.num_speakers,
                        "channel_mode": "mixdown", "asr_version": asr_version,
-                       "speaker_model_version": args.speaker_model_version},
+                       "speaker_model_version": args.speaker_model_version,
+                       "inference": INFERENCE_CONFIG},
+        "runtime": _runtime_provenance(),
         "models": {"asr_model_directory": str(model_dir), "asr_model_id": model_dir.name,
                    "segmentation_model": str(segmentation), "speaker_embedding_model": str(embedding)},
-        "inputs": {name: {"path": str(path), "sha256": sha256(path)} for name, path in input_paths.items()},
+        "inputs": input_snapshot,
         "outputs": {},
     }
     return output, metrics, manifest
