@@ -12,6 +12,7 @@ import pytest
 from backend.app.audio.core import AudioBuffer
 from backend.app.engines.base import EngineConfigError
 from backend.app.jobs.service import TranscriptionService
+from backend.app.main import _diarization_cluster_threshold
 from backend.app.pipelines.file_asr import FileASRService
 from backend.app.speakers.diarization import SherpaOfflineDiarizer
 from backend.app.speakers.matching import SpeakerMatcher
@@ -102,6 +103,21 @@ def test_sherpa_adapter_loads_official_config_and_stabilizes_ids(tmp_path, monke
 def test_diarization_missing_model_fails_explicitly(tmp_path):
     with pytest.raises(EngineConfigError, match="模型文件缺失"):
         SherpaOfflineDiarizer.load(tmp_path / "missing-seg.onnx", tmp_path / "missing-emb.onnx")
+
+
+def test_diarization_cluster_threshold_setting_defaults_and_parses(monkeypatch):
+    monkeypatch.delenv("ASR_DIARIZATION_CLUSTER_THRESHOLD", raising=False)
+    assert _diarization_cluster_threshold() == 0.5
+
+    monkeypatch.setenv("ASR_DIARIZATION_CLUSTER_THRESHOLD", "0.65")
+    assert _diarization_cluster_threshold() == 0.65
+
+
+@pytest.mark.parametrize("value", ["invalid", "nan", "inf", "0", "1", "-0.1", "1.1"])
+def test_diarization_cluster_threshold_setting_rejects_invalid_values(monkeypatch, value):
+    monkeypatch.setenv("ASR_DIARIZATION_CLUSTER_THRESHOLD", value)
+    with pytest.raises(EngineConfigError, match="ASR_DIARIZATION_CLUSTER_THRESHOLD"):
+        _diarization_cluster_threshold()
 
 
 def test_speaker_matcher_aggregates_clean_segments_and_applies_model_and_margin_gates(tmp_path):

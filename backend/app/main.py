@@ -73,6 +73,18 @@ def _positive_integer_setting(name: str, default: int) -> int:
     return value
 
 
+def _diarization_cluster_threshold() -> float:
+    name = "ASR_DIARIZATION_CLUSTER_THRESHOLD"
+    raw = os.environ.get(name, "0.5")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise EngineConfigError(f"{name} 必须是大于 0 且小于 1 的数值") from exc
+    if not 0.0 < value < 1.0:
+        raise EngineConfigError(f"{name} 必须是大于 0 且小于 1 的数值")
+    return value
+
+
 def _hotword_service(database: SQLiteStore, directory: Path, *, mode: str, bpe_model: Path) -> HotwordService:
     compiler = HotwordCompiler(
         mixed_cjk_bpe_tokenizer(bpe_model),
@@ -229,6 +241,7 @@ async def lifespan(application: FastAPI):
                     diarization_path, model_path,
                     num_threads=int(os.environ.get("ASR_DIARIZATION_THREADS", "2")),
                     num_speakers=int(os.environ.get("ASR_DIARIZATION_NUM_SPEAKERS", "-1")),
+                    cluster_threshold=_diarization_cluster_threshold(),
                 ) if diarization_path and model_path else None
                 speaker_matcher = SpeakerMatcher(
                     database, extractor,
