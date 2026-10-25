@@ -182,6 +182,37 @@ def test_versioned_resolver_keeps_old_snapshot_and_deactivation_blocks_new_jobs(
     store.close()
 
 
+def test_stream_resolvers_pass_snapshot_weight_and_keep_requested_version(tmp_path):
+    from backend.app.main import _resolved_offline_stream_words, _resolved_stream_words
+
+    store, service = _service(tmp_path)
+    created = service.create(name="weighted", entries=["张三"], weight=2.5)
+    set_id = created["set_id"]
+    updated = service.update(set_id, expected_version=1, entries=["李梅"], weight=4.25)
+
+    online_words, online_version = _resolved_stream_words(service, set_id)
+    offline_words, offline_version = _resolved_offline_stream_words(service, set_id, 1)
+
+    class StreamRecorder:
+        def __init__(self):
+            self.values = []
+
+        def create_stream(self, hotwords=None):
+            self.values.append(hotwords)
+
+    online_recognizer = StreamRecorder()
+    online_recognizer.create_stream(online_words)
+    offline_recognizer = StreamRecorder()
+    offline_recognizer.create_stream(offline_words)
+
+    assert updated["version"] == 2
+    assert online_version == 2
+    assert online_recognizer.values == [["李 梅 :4.25"]]
+    assert offline_version == 1
+    assert offline_recognizer.values == [["张 三 :2.5"]]
+    store.close()
+
+
 def test_optimistic_updates_allow_only_one_writer_at_a_version(tmp_path):
     store, service = _service(tmp_path)
     created = service.create(name="shared", entries=["张三"])

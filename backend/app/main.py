@@ -1,6 +1,7 @@
 """FastAPI application entry point."""
 
 import asyncio
+import math
 import os
 import stat
 import tempfile
@@ -97,8 +98,7 @@ def _hotword_service(database: SQLiteStore, directory: Path, *, mode: str, bpe_m
 
 def _resolved_stream_words(service: HotwordService, set_id: str) -> tuple[list[str], int]:
     snapshot = service.resolve(set_id, mode="online")
-    compiled = snapshot.as_dict()["compiled"]
-    words = [" ".join(entry["tokens"]) for entry in compiled["entries"]]
+    words = _weighted_snapshot_words(snapshot)
     return words, snapshot.version
 
 
@@ -107,9 +107,30 @@ def _resolved_offline_stream_words(service: HotwordService | None, set_id: str,
     if service is None:
         return [], version
     snapshot = service.resolve(set_id, version=version, mode="offline")
-    compiled = snapshot.as_dict()["compiled"]
-    words = [" ".join(entry["tokens"]) for entry in compiled["entries"]]
+    words = _weighted_snapshot_words(snapshot)
     return words, snapshot.version
+
+
+def _weighted_snapshot_words(snapshot) -> list[str]:
+    """Format compiled token sequences in sherpa's trailing-score syntax."""
+    weight = snapshot.weight
+    if (isinstance(weight, bool) or not isinstance(weight, (int, float))
+            or not math.isfinite(weight) or not 0 < weight <= 20):
+        raise ValueError("热词快照权重无效")
+    compiled = snapshot.as_dict()["compiled"]
+    entries = compiled.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("热词快照词条无效")
+    score = format(weight, ".15g")
+    words = []
+    for entry in entries:
+        tokens = entry.get("tokens") if isinstance(entry, dict) else None
+        if (not isinstance(tokens, list) or not tokens
+                or any(not isinstance(token, str) or not token or any(char.isspace() for char in token)
+                       or token.startswith(":") for token in tokens)):
+            raise ValueError("热词快照分词无效")
+        words.append(f"{' '.join(tokens)} :{score}")
+    return words
 
 
 def _compile_offline_inline_words(service: HotwordService | None,
